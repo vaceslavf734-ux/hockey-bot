@@ -66,20 +66,6 @@ async def init_db():
         """)
         await db.commit()
 
-# === УТИЛИТА: безопасное удаление ===
-async def safe_delete(chat_id: int, message_id: int):
-    try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
-
-# === ПРОВЕРКА ТРЕНЕРА ===
-async def is_coach(user_id: int) -> bool:
-    async with aiosqlite.connect("hockey.db") as db:
-        cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return row is not None
-
 # === КНОПКИ ВЫБОРА РОЛИ ===
 def get_role_keyboard():
     keyboard = InlineKeyboardMarkup(
@@ -107,8 +93,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         elif coach:
             await message.answer("Ты тренер! Используй /new_training чтобы создать тренировку.")
         else:
-            # Удаляем команду /start
-            await safe_delete(message.chat.id, message.message_id)
             # Отправляем кнопки
             sent = await message.answer(
                 "Привет! Кто ты?",
@@ -121,11 +105,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-
-    # Удаляем сообщение с кнопками
-    await safe_delete(callback.message.chat.id, callback.message.message_id)
-    if prev_id:
-        await safe_delete(callback.message.chat.id, prev_id)
 
     if callback.data == "role_player":
         sent = await callback.message.answer(
@@ -147,7 +126,6 @@ async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
 async def handle_text_before_role_selection(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state is None:
-        await safe_delete(message.chat.id, message.message_id)
         sent = await message.answer(
             "Пожалуйста, выбери свою роль с помощью кнопок 👇",
             reply_markup=get_role_keyboard()
@@ -159,9 +137,6 @@ async def handle_text_before_role_selection(message: types.Message, state: FSMCo
 async def process_full_name_and_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
 
     text = message.text.strip().split()
     if len(text) < 2:
@@ -202,9 +177,6 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
 async def process_coach_password(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
 
     if message.text.strip() != COACH_PASSWORD:
         sent = await message.answer("❌ Неверный пароль. Попробуй снова или напиши /iamcoach.")
@@ -219,9 +191,6 @@ async def process_coach_password(message: types.Message, state: FSMContext):
 async def process_coach_first_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
     await state.update_data(first_name=message.text.strip())
     sent = await message.answer("А фамилия?")
     await state.update_data(prev_bot_msg_id=sent.message_id)
@@ -231,9 +200,6 @@ async def process_coach_first_name(message: types.Message, state: FSMContext):
 async def process_coach_last_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
 
     user_id = message.from_user.id
     first = data["first_name"]
@@ -269,9 +235,6 @@ async def cmd_new_training(message: types.Message, state: FSMContext):
 async def process_training_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
 
     text = message.text.strip()
     if len(text) != 16 or text[2] != '.' or text[5] != '.' or text[10] != ' ' or text[13] != ':':
@@ -288,9 +251,6 @@ async def process_training_datetime(message: types.Message, state: FSMContext):
 async def process_training_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
     await state.update_data(location=message.text.strip())
     sent = await message.answer("👥 Максимальное число игроков (например: 20)")
     await state.update_data(prev_bot_msg_id=sent.message_id)
@@ -300,9 +260,6 @@ async def process_training_location(message: types.Message, state: FSMContext):
 async def process_training_max_players(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
     if not message.text.strip().isdigit():
         sent = await message.answer("❌ Введи число (например: 20)")
         await state.update_data(prev_bot_msg_id=sent.message_id)
@@ -316,9 +273,6 @@ async def process_training_max_players(message: types.Message, state: FSMContext
 async def process_training_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
 
     desc = message.text.strip()
     if desc == "-":
@@ -437,7 +391,6 @@ async def cmd_restart(message: types.Message, state: FSMContext):
         await db.execute("DELETE FROM coaches WHERE user_id = ?", (user_id,))
         await db.commit()
     await state.clear()
-    await safe_delete(message.chat.id, message.message_id)
     sent = await message.answer(
         "Привет! Кто ты?",
         reply_markup=get_role_keyboard()
