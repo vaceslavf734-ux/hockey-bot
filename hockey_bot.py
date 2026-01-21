@@ -207,8 +207,14 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
         )
         await db.commit()
 
+    # ✅ ПОКАЗЫВАЕМ ПРОФИЛЬ НЕПОСРЕДСТВЕННО
     sent = await message.answer(
-        f"✅ Добро пожаловать, {first_name} {last_name}!\nТеперь ты в команде.",
+        f"✅ Добро пожаловать, {first_name} {last_name}!\n\n"
+        f"👤 <b>Игрок</b>\n"
+        f"Имя: {first_name}\n"
+        f"Фамилия: {last_name}\n"
+        f"Номер: #{number}",
+        parse_mode="HTML",
         reply_markup=get_main_menu(is_coach=False)
     )
     await state.update_data(prev_bot_msg_id=sent.message_id)
@@ -265,8 +271,13 @@ async def process_coach_full_name(message: types.Message, state: FSMContext):
         )
         await db.commit()
 
+    # ✅ ПОКАЗЫВАЕМ ПРОФИЛЬ НЕПОСРЕДСТВЕННО
     sent = await message.answer(
-        f"✅ Добро пожаловать, тренер {first_name} {last_name}!",
+        f"✅ Добро пожаловать, тренер {first_name} {last_name}!\n\n"
+        f"👨‍🏫 <b>Тренер</b>\n"
+        f"Имя: {first_name}\n"
+        f"Фамилия: {last_name}",
+        parse_mode="HTML",
         reply_markup=get_main_menu(is_coach=True)
     )
     await state.update_data(prev_bot_msg_id=sent.message_id)
