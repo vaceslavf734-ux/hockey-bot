@@ -78,6 +78,24 @@ def get_role_keyboard():
     )
     return keyboard
 
+# === КНОПКИ ДЛЯ ТРЕНИРОВКИ ===
+def get_training_keyboard(training_id: int):
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Записаться", callback_data=f"join_{training_id}")],
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"refresh_{training_id}")]
+    ])
+    return keyboard
+
+# === ГЛАВНОЕ МЕНЮ ===
+def get_main_menu():
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Тренировки", callback_data="trainings")],
+            [InlineKeyboardButton(text="👥 Состав", callback_data="squad")]
+        ]
+    )
+    return keyboard
+
 # === /start ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -88,17 +106,29 @@ async def cmd_start(message: types.Message, state: FSMContext):
         cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
         coach = await cursor.fetchone()
 
-        if player:
-            await show_profile(message)
-        elif coach:
-            await message.answer("Ты тренер! Используй /new_training чтобы создать тренировку.")
+        if player or coach:
+            await message.answer(
+                "Привет! Выбери действие:",
+                reply_markup=get_main_menu()
+            )
         else:
             await message.answer(
                 "Привет! Кто ты?",
                 reply_markup=get_role_keyboard()
             )
 
-# === Обработка нажатия кнопок ===
+# === Обработка нажатия кнопок главного меню ===
+@dp.callback_query(lambda c: c.data == "trainings")
+async def handle_trainings(callback: types.CallbackQuery):
+    await cmd_trainings(callback.message)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "squad")
+async def handle_squad(callback: types.CallbackQuery):
+    await show_squad(callback.message)
+    await callback.answer()
+
+# === Обработка нажатия кнопок выбора роли ===
 @dp.callback_query(lambda c: c.data in ["role_player", "role_coach"])
 async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == "role_player":
@@ -146,7 +176,10 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
         )
         await db.commit()
 
-    await show_profile(message)
+    await message.answer(
+        f"✅ Добро пожаловать, {first_name} {last_name}!\nТеперь ты в команде.",
+        reply_markup=get_main_menu()
+    )
     await state.clear()
 
 # === РЕГИСТРАЦИЯ ТРЕНЕРА ===
@@ -179,7 +212,10 @@ async def process_coach_last_name(message: types.Message, state: FSMContext):
         )
         await db.commit()
 
-    await message.answer(f"✅ Добро пожаловать, тренер {first} {last}!\nТеперь ты можешь создавать тренировки через /new_training.")
+    await message.answer(
+        f"✅ Добро пожаловать, тренер {first} {last}!",
+        reply_markup=get_main_menu()
+    )
     await state.clear()
 
 # === /new_training ===
@@ -261,37 +297,72 @@ async def cmd_trainings(message: types.Message):
             await message.answer("Нет запланированных тренировок.")
             return
 
-        text = "🏒 <b>Ближайшие тренировки:</b>\n\n"
         for row in rows:
             training_id, dt, loc, max_p = row
-            reg_cursor = await db.execute("SELECT COUNT(*) FROM registrations WHERE training_id = ?", (training_id,))
-            count = (await reg_cursor.fetchone())[0]
-            text += f"ID: {training_id} | {dt} | {loc} | {count}/{max_p} игроков\n"
+            reg_cursor = await db.execute("""
+                SELECT p.first_name, p.last_name, p.jersey_number
+                FROM registrations r
+                JOIN players p ON r.user_id = p.user_id
+                WHERE r.training_id = ?
+                ORDER BY p.last_name
+            """, (training_id,))
+            players = await reg_cursor.fetchall()
+
+            text = f"🏒 <b>Тренировка ID {training_id}</b>\n"
+            text += f"📅 {dt}\n📍 {loc}\n\n"
+
+            if players:
+                text += "<b>Записаны:</b>\n"
+                for i, (first, last, num) in enumerate(players, 1):
+                    text += f"{i}. {first} {last} (#{num})\n"
+                text += f"\n👥 {len(players)}/{max_p} игроков"
+            else:
+                text += "<i>Пока никто не записался</i>"
+
+            await message.answer(
+                text,
+                parse_mode="HTML",
+                reply_markup=get_training_keyboard(training_id)
+            )
+
+# === КОМАНДА /squad — СОСТАВ ===
+@dp.message(Command("squad"))
+async def show_squad(message: types.Message):
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute("""
+            SELECT first_name, last_name, jersey_number FROM players ORDER BY last_name
+        """)
+        players = await cursor.fetchall()
+
+        if not players:
+            await message.answer("В составе пока никого нет.")
+            return
+
+        text = "👥 <b>Состав команды:</b>\n\n"
+        for i, (first, last, num) in enumerate(players, 1):
+            text += f"{i}. {first} {last} (#{num})\n"
 
         await message.answer(text, parse_mode="HTML")
 
-# === /join ===
-@dp.message(Command("join"))
-async def cmd_join(message: types.Message):
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Используй: /join <ID_тренировки>")
-        return
+# === КНОПКА «Состав» из меню ===
+# (уже обрабатывается через handle_squad → вызывает show_squad)
 
-    training_id = int(args[1])
-    user_id = message.from_user.id
+# === ЗАПИСЬ НА ТРЕНИРОВКУ ===
+@dp.callback_query(lambda c: c.data.startswith("join_"))
+async def handle_join_training(callback: types.CallbackQuery):
+    training_id = int(callback.data.split("_")[1])
+    user_id = callback.from_user.id
 
     async with aiosqlite.connect("hockey.db") as db:
         cursor = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,))
-        player = await cursor.fetchone()
-        if not player:
-            await message.answer("Ты должен быть зарегистрирован как игрок. Напиши /start")
+        if not await cursor.fetchone():
+            await callback.answer("❌ Ты должен быть зарегистрирован как игрок.", show_alert=True)
             return
 
         cursor = await db.execute("SELECT max_players FROM trainings WHERE id = ?", (training_id,))
         tr = await cursor.fetchone()
         if not tr:
-            await message.answer("Тренировка с таким ID не найдена.")
+            await callback.answer("Тренировка не найдена.", show_alert=True)
             return
 
         max_players = tr[0]
@@ -299,15 +370,97 @@ async def cmd_join(message: types.Message):
         current_count = (await cursor.fetchone())[0]
 
         if current_count >= max_players:
-            await message.answer("❌ На этой тренировке уже нет мест.")
+            await callback.answer("❌ На этой тренировке уже нет мест.", show_alert=True)
             return
 
+        cursor = await db.execute("SELECT 1 FROM registrations WHERE user_id = ? AND training_id = ?", (user_id, training_id))
+        if await cursor.fetchone():
+            await callback.answer("✅ Ты уже записан!", show_alert=True)
+            return
+
+        await db.execute("INSERT INTO registrations (user_id, training_id) VALUES (?, ?)", (user_id, training_id))
+        await db.commit()
+        await callback.answer("✅ Записан!", show_alert=False)
+
+        # ОБНОВЛЯЕМ СООБЩЕНИЕ
+        cursor = await db.execute("SELECT datetime, location, max_players FROM trainings WHERE id = ?", (training_id,))
+        tr_data = await cursor.fetchone()
+        if not tr_
+            return
+
+        dt, loc, max_p = tr_data
+
+        reg_cursor = await db.execute("""
+            SELECT p.first_name, p.last_name, p.jersey_number
+            FROM registrations r
+            JOIN players p ON r.user_id = p.user_id
+            WHERE r.training_id = ?
+            ORDER BY p.last_name
+        """, (training_id,))
+        players = await reg_cursor.fetchall()
+
+        text = f"🏒 <b>Тренировка ID {training_id}</b>\n"
+        text += f"📅 {dt}\n📍 {loc}\n\n"
+
+        if players:
+            text += "<b>Записаны:</b>\n"
+            for i, (first, last, num) in enumerate(players, 1):
+                text += f"{i}. {first} {last} (#{num})\n"
+            text += f"\n👥 {len(players)}/{max_p} игроков"
+        else:
+            text += "<i>Пока никто не записался</i>"
+
         try:
-            await db.execute("INSERT INTO registrations (user_id, training_id) VALUES (?, ?)", (user_id, training_id))
-            await db.commit()
-            await message.answer(f"✅ Ты записан на тренировку ID {training_id}!")
-        except aiosqlite.IntegrityError:
-            await message.answer("Ты уже записан на эту тренировку.")
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=get_training_keyboard(training_id)
+            )
+        except Exception:
+            pass
+
+# === ОБНОВЛЕНИЕ СПИСКА ===
+@dp.callback_query(lambda c: c.data.startswith("refresh_"))
+async def handle_refresh_training(callback: types.CallbackQuery):
+    training_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute("SELECT datetime, location, max_players FROM trainings WHERE id = ?", (training_id,))
+        tr_data = await cursor.fetchone()
+        if not tr_
+            await callback.answer("Тренировка не найдена.", show_alert=True)
+            return
+
+        dt, loc, max_p = tr_data
+
+        reg_cursor = await db.execute("""
+            SELECT p.first_name, p.last_name, p.jersey_number
+            FROM registrations r
+            JOIN players p ON r.user_id = p.user_id
+            WHERE r.training_id = ?
+            ORDER BY p.last_name
+        """, (training_id,))
+        players = await reg_cursor.fetchall()
+
+        text = f"🏒 <b>Тренировка ID {training_id}</b>\n"
+        text += f"📅 {dt}\n📍 {loc}\n\n"
+
+        if players:
+            text += "<b>Записаны:</b>\n"
+            for i, (first, last, num) in enumerate(players, 1):
+                text += f"{i}. {first} {last} (#{num})\n"
+            text += f"\n👥 {len(players)}/{max_p} игроков"
+        else:
+            text += "<i>Пока никто не записался</i>"
+
+        try:
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=get_training_keyboard(training_id)
+            )
+            await callback.answer("🔄 Обновлено!", show_alert=False)
+        except Exception:
+            await callback.answer("Не удалось обновить.", show_alert=True)
 
 # === /profile ===
 @dp.message(Command("profile"))
@@ -334,7 +487,7 @@ async def show_profile(message: types.Message):
 
     await message.answer("Ты не зарегистрирован. Напиши /start")
 
-# === /restart — полный сброс ===
+# === /restart ===
 @dp.message(Command("restart"))
 async def cmd_restart(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -356,7 +509,7 @@ async def is_coach(user_id: int) -> bool:
         row = await cursor.fetchone()
         return row is not None
 
-# === УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (последний!) ===
+# === УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК ===
 @dp.message()
 async def fallback_handler(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
