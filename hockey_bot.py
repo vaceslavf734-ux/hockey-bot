@@ -385,7 +385,7 @@ async def handle_join_training(callback: types.CallbackQuery):
         # ОБНОВЛЯЕМ СООБЩЕНИЕ
         cursor = await db.execute("SELECT datetime, location, max_players FROM trainings WHERE id = ?", (training_id,))
         tr_data = await cursor.fetchone()
-        if not tr_
+        if not tr_data:
             return
 
         dt, loc, max_p = tr_data
