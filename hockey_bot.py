@@ -128,7 +128,6 @@ async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
         await safe_delete(callback.message.chat.id, prev_id)
 
     if callback.data == "role_player":
-        # Начинаем регистрацию игрока — запрашиваем имя, фамилию и номер в одном сообщении
         sent = await callback.message.answer(
             "📝 Введи своё имя, фамилию и хоккейный номер через пробел:\n\n"
             "<code>Слава Федоров 19</code>",
@@ -137,7 +136,6 @@ async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
         await state.update_data(prev_bot_msg_id=sent.message_id)
         await state.set_state(PlayerRegistration.full_name_and_number)
     else:  # role_coach
-        # Начинаем регистрацию тренера
         sent = await callback.message.answer("🔐 Введи пароль тренера:")
         await state.update_data(prev_bot_msg_id=sent.message_id)
         await state.set_state(CoachRegistration.password)
@@ -148,17 +146,15 @@ async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(~Command("start"), ~Command("restart"), ~Command("profile"), ~Command("trainings"), ~Command("join"), ~Command("new_training"))
 async def handle_text_before_role_selection(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state is None:  # Пользователь ещё не выбрал роль
-        # Удаляем его сообщение
+    if current_state is None:
         await safe_delete(message.chat.id, message.message_id)
-        # Показываем кнопки снова
         sent = await message.answer(
             "Пожалуйста, выбери свою роль с помощью кнопок 👇",
             reply_markup=get_role_keyboard()
         )
         await state.update_data(prev_bot_msg_id=sent.message_id)
 
-# === РЕГИСТРАЦИЯ ИГРОКА — имя, фамилия, номер в одном сообщении ===
+# === РЕГИСТРАЦИЯ ИГРОКА ===
 @dp.message(PlayerRegistration.full_name_and_number)
 async def process_full_name_and_number(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -168,7 +164,7 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
         await safe_delete(message.chat.id, prev_id)
 
     text = message.text.strip().split()
-    if len(text) < 3:
+    if len(text) < 2:
         sent = await message.answer(
             "❌ Неверный формат.\n\n"
             "Напиши: <code>Имя Фамилия Номер</code>\n"
@@ -178,15 +174,16 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
         await state.update_data(prev_bot_msg_id=sent.message_id)
         return
 
-    # Извлекаем данные
-    first_name = text[0]
-    last_name = text[1]
-    number = text[2]
-
+    number = text[-1]
     if not number.isdigit():
         sent = await message.answer("❌ Номер должен быть числом (например: 19).")
         await state.update_data(prev_bot_msg_id=sent.message_id)
         return
+
+    full_name = " ".join(text[:-1])
+    parts = full_name.split(" ", 1)
+    first_name = parts[0]
+    last_name = parts[1] if len(parts) > 1 else "Не указано"
 
     user_id = message.from_user.id
 
@@ -197,7 +194,6 @@ async def process_full_name_and_number(message: types.Message, state: FSMContext
         )
         await db.commit()
 
-    # ❗ Показываем профиль вместо "Регистрация завершена!"
     await show_profile(message)
     await state.clear()
 
@@ -441,9 +437,7 @@ async def cmd_restart(message: types.Message, state: FSMContext):
         await db.execute("DELETE FROM coaches WHERE user_id = ?", (user_id,))
         await db.commit()
     await state.clear()
-    # Удаляем команду /restart
     await safe_delete(message.chat.id, message.message_id)
-    # Показываем кнопки заново
     sent = await message.answer(
         "Привет! Кто ты?",
         reply_markup=get_role_keyboard()
