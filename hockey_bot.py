@@ -16,7 +16,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # === СОСТОЯНИЯ ===
 class PlayerRegistration(StatesGroup):
-    full_name_and_number = State()  # Имя Фамилия Номер в одном сообщении
+    full_name_and_number = State()
 
 class CoachRegistration(StatesGroup):
     password = State()
@@ -77,7 +77,8 @@ async def safe_delete(chat_id: int, message_id: int):
 async def is_coach(user_id: int) -> bool:
     async with aiosqlite.connect("hockey.db") as db:
         cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
-        return await cursor.fetchone() is not None
+        row = await cursor.fetchone()
+        return row is not None
 
 # === КНОПКИ ВЫБОРА РОЛИ ===
 def get_role_keyboard():
@@ -96,8 +97,11 @@ def get_role_keyboard():
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     async with aiosqlite.connect("hockey.db") as db:
-        player = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,)).fetchone()
-        coach = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,)).fetchone()
+        cursor = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,))
+        player = await cursor.fetchone()
+        cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
+        coach = await cursor.fetchone()
+
         if player:
             await show_profile(message)
         elif coach:
@@ -376,18 +380,21 @@ async def cmd_join(message: types.Message):
     user_id = message.from_user.id
 
     async with aiosqlite.connect("hockey.db") as db:
-        player = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,)).fetchone()
+        cursor = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,))
+        player = await cursor.fetchone()
         if not player:
             await message.answer("Ты должен быть зарегистрирован как игрок. Напиши /start")
             return
 
-        tr = await db.execute("SELECT max_players FROM trainings WHERE id = ?", (training_id,)).fetchone()
+        cursor = await db.execute("SELECT max_players FROM trainings WHERE id = ?", (training_id,))
+        tr = await cursor.fetchone()
         if not tr:
             await message.answer("Тренировка с таким ID не найдена.")
             return
 
         max_players = tr[0]
-        current_count = (await db.execute("SELECT COUNT(*) FROM registrations WHERE training_id = ?", (training_id,))).fetchone()[0]
+        cursor = await db.execute("SELECT COUNT(*) FROM registrations WHERE training_id = ?", (training_id,))
+        current_count = (await cursor.fetchone())[0]
 
         if current_count >= max_players:
             await message.answer("❌ На этой тренировке уже нет мест.")
@@ -405,17 +412,19 @@ async def cmd_join(message: types.Message):
 async def show_profile(message: types.Message):
     user_id = message.from_user.id
     async with aiosqlite.connect("hockey.db") as db:
-        player = await db.execute(
+        cursor = await db.execute(
             "SELECT first_name, last_name, jersey_number FROM players WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        )
+        player = await cursor.fetchone()
         if player:
             f, l, n = player
             await message.answer(f"👤 <b>Игрок</b>\nИмя: {f}\nФамилия: {l}\nНомер: #{n}", parse_mode="HTML")
             return
 
-        coach = await db.execute(
+        cursor = await db.execute(
             "SELECT first_name, last_name FROM coaches WHERE user_id = ?", (user_id,)
-        ).fetchone()
+        )
+        coach = await cursor.fetchone()
         if coach:
             f, l = coach
             await message.answer(f"👨‍🏫 <b>Тренер</b>\nИмя: {f}\nФамилия: {l}", parse_mode="HTML")
