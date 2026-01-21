@@ -426,7 +426,7 @@ async def handle_refresh_training(callback: types.CallbackQuery):
     async with aiosqlite.connect("hockey.db") as db:
         cursor = await db.execute("SELECT datetime, location, max_players FROM trainings WHERE id = ?", (training_id,))
         tr_data = await cursor.fetchone()
-        if not tr_
+        if not tr_data:
             await callback.answer("Тренировка не найдена.", show_alert=True)
             return
 
