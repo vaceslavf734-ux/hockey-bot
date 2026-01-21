@@ -20,8 +20,7 @@ class PlayerRegistration(StatesGroup):
 
 class CoachRegistration(StatesGroup):
     password = State()
-    first_name = State()
-    last_name = State()
+    full_name = State()  # Имя и фамилия в одном сообщении
 
 class NewTraining(StatesGroup):
     datetime = State()
@@ -230,12 +229,12 @@ async def process_coach_password(message: types.Message, state: FSMContext):
         await state.update_data(prev_bot_msg_id=sent.message_id)
         return
 
-    sent = await message.answer("✅ Пароль верный!\nКак тебя зовут? (имя)")
+    sent = await message.answer("✅ Пароль верный!\nВведи своё имя и фамилию через пробел:\n\n<code>Иван Петров</code>")
     await state.update_data(prev_bot_msg_id=sent.message_id)
-    await state.set_state(CoachRegistration.first_name)
+    await state.set_state(CoachRegistration.full_name)
 
-@dp.message(CoachRegistration.first_name)
-async def process_coach_first_name(message: types.Message, state: FSMContext):
+@dp.message(CoachRegistration.full_name)
+async def process_coach_full_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
 
@@ -243,33 +242,31 @@ async def process_coach_first_name(message: types.Message, state: FSMContext):
     if prev_id:
         await safe_delete(message.chat.id, prev_id)
 
-    await state.update_data(first_name=message.text.strip())
-    sent = await message.answer("А фамилия?")
-    await state.update_data(prev_bot_msg_id=sent.message_id)
-    await state.set_state(CoachRegistration.last_name)
+    text = message.text.strip().split()
+    if len(text) < 2:
+        sent = await message.answer(
+            "❌ Неверный формат.\n\n"
+            "Напиши: <code>Имя Фамилия</code>\n"
+            "Пример: <code>Иван Петров</code>",
+            parse_mode="HTML"
+        )
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
 
-@dp.message(CoachRegistration.last_name)
-async def process_coach_last_name(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    prev_id = data.get("prev_bot_msg_id")
-
-    await safe_delete(message.chat.id, message.message_id)
-    if prev_id:
-        await safe_delete(message.chat.id, prev_id)
+    first_name = text[0]
+    last_name = " ".join(text[1:])  # Фамилия может состоять из нескольких слов
 
     user_id = message.from_user.id
-    first = data["first_name"]
-    last = message.text.strip()
 
     async with aiosqlite.connect("hockey.db") as db:
         await db.execute(
             "INSERT INTO coaches (user_id, first_name, last_name) VALUES (?, ?, ?)",
-            (user_id, first, last)
+            (user_id, first_name, last_name)
         )
         await db.commit()
 
     sent = await message.answer(
-        f"✅ Добро пожаловать, тренер {first} {last}!",
+        f"✅ Добро пожаловать, тренер {first_name} {last_name}!",
         reply_markup=get_main_menu(is_coach=True)
     )
     await state.update_data(prev_bot_msg_id=sent.message_id)
@@ -400,7 +397,7 @@ async def cmd_trainings(message: types.Message):
 
 # === КНОПКА «Тренировки» ===
 @dp.callback_query(lambda c: c.data == "trainings")
-async def handle_trainings_callback(callback: types.CallbackQuery):
+async def handle_trainings_callback(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
 
