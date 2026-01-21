@@ -5,6 +5,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import Command
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # === ТОКЕН БОТА ===
 BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
@@ -80,6 +81,18 @@ async def is_coach(user_id: int) -> bool:
         cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
         return await cursor.fetchone() is not None
 
+# === КНОПКИ ВЫБОРА РОЛИ ===
+def get_role_keyboard():
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👤 Я игрок", callback_data="role_player"),
+                InlineKeyboardButton(text="👨‍🏫 Я тренер", callback_data="role_coach")
+            ]
+        ]
+    )
+    return keyboard
+
 # === /start ===
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -92,29 +105,40 @@ async def cmd_start(message: types.Message, state: FSMContext):
         elif coach:
             await message.answer("Ты тренер! Используй /new_training чтобы создать тренировку.")
         else:
-            await message.answer(
-                "Привет! Кто ты?\n\n"
-                "🔹 Игрок → просто напиши что-нибудь\n"
-                "🔹 Тренер → используй /iamcoach"
+            # Удаляем команду /start
+            await safe_delete(message.chat.id, message.message_id)
+            # Отправляем кнопки
+            sent = await message.answer(
+                "Привет! Кто ты?",
+                reply_markup=get_role_keyboard()
             )
+            await state.update_data(prev_bot_msg_id=sent.message_id)
 
-# === /restart ===
-@dp.message(Command("restart"))
-async def cmd_restart(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    async with aiosqlite.connect("hockey.db") as db:
-        await db.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
-        await db.execute("DELETE FROM coaches WHERE user_id = ?", (user_id,))
-        await db.commit()
-    await state.clear()
-    # Удаляем команду /restart
-    await safe_delete(message.chat.id, message.message_id)
-    # Запускаем как нового игрока
-    sent = await message.answer("Как тебя зовут?")
-    await state.update_data(prev_bot_msg_id=sent.message_id)
-    await state.set_state(PlayerRegistration.first_name)
+# === Обработка нажатия кнопок ===
+@dp.callback_query(lambda c: c.data in ["role_player", "role_coach"])
+async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
 
-# === РЕГИСТРАЦИЯ ИГРОКА (начинается с любого сообщения) ===
+    # Удаляем сообщение с кнопками
+    await safe_delete(callback.message.chat.id, callback.message.message_id)
+    if prev_id:
+        await safe_delete(callback.message.chat.id, prev_id)
+
+    if callback.data == "role_player":
+        # Начинаем регистрацию игрока
+        sent = await callback.message.answer("Как тебя зовут?")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        await state.set_state(PlayerRegistration.first_name)
+    else:  # role_coach
+        # Начинаем регистрацию тренера
+        sent = await callback.message.answer("🔐 Введи пароль тренера:")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        await state.set_state(CoachRegistration.password)
+
+    await callback.answer()
+
+# === РЕГИСТРАЦИЯ ИГРОКА ===
 @dp.message(PlayerRegistration.first_name)
 async def process_first_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
@@ -164,27 +188,11 @@ async def process_jersey_number(message: types.Message, state: FSMContext):
         )
         await db.commit()
 
-    # ❗ Вместо "Регистрация завершена!" — сразу показываем профиль
+    # ❗ Показываем профиль вместо "Регистрация завершена!"
     await show_profile(message)
     await state.clear()
 
-# === /iamcoach ===
-@dp.message(Command("iamcoach"))
-async def cmd_iamcoach(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    async with aiosqlite.connect("hockey.db") as db:
-        if await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,)).fetchone():
-            await message.answer("Ты уже тренер!")
-            return
-        if await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,)).fetchone():
-            await message.answer("Ты уже игрок. Нельзя быть и тем, и другим.")
-            return
-
-    await safe_delete(message.chat.id, message.message_id)
-    sent = await message.answer("🔐 Введи пароль тренера:")
-    await state.update_data(prev_bot_msg_id=sent.message_id)
-    await state.set_state(CoachRegistration.password)
-
+# === РЕГИСТРАЦИЯ ТРЕНЕРА ===
 @dp.message(CoachRegistration.password)
 async def process_coach_password(message: types.Message, state: FSMContext):
     data = await state.get_data()
