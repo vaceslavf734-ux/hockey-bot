@@ -114,16 +114,6 @@ async def handle_role_choice(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.answer()
 
-# === Обработка текста до выбора роли ===
-@dp.message(~Command("start"), ~Command("restart"), ~Command("profile"), ~Command("trainings"), ~Command("join"), ~Command("new_training"))
-async def handle_text_before_role_selection(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer(
-            "Пожалуйста, выбери свою роль с помощью кнопок 👇",
-            reply_markup=get_role_keyboard()
-        )
-
 # === РЕГИСТРАЦИЯ ИГРОКА ===
 @dp.message(PlayerRegistration.full_name_and_number)
 async def process_full_name_and_number(message: types.Message, state: FSMContext):
@@ -192,8 +182,132 @@ async def process_coach_last_name(message: types.Message, state: FSMContext):
     await message.answer(f"✅ Добро пожаловать, тренер {first} {last}!\nТеперь ты можешь создавать тренировки через /new_training.")
     await state.clear()
 
-# === ОСТАЛЬНЫЕ КОМАНДЫ (/new_training, /trainings, /join, /profile) ===
-# ... (оставь их как есть — они уже работают)
+# === /new_training ===
+@dp.message(Command("new_training"))
+async def cmd_new_training(message: types.Message, state: FSMContext):
+    if not await is_coach(message.from_user.id):
+        await message.answer("❌ Эта команда только для тренеров.")
+        return
+
+    await message.answer(
+        "📅 Введи дату и время тренировки в формате:\n"
+        "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
+        "Пример: <code>05.02.2026 19:00</code>",
+        parse_mode="HTML"
+    )
+    await state.set_state(NewTraining.datetime)
+
+@dp.message(NewTraining.datetime)
+async def process_training_datetime(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    if len(text) != 16 or text[2] != '.' or text[5] != '.' or text[10] != ' ' or text[13] != ':':
+        await message.answer("❌ Неверный формат. Попробуй ещё раз:\n<code>05.02.2026 19:00</code>", parse_mode="HTML")
+        return
+
+    await state.update_data(datetime=text)
+    await message.answer("📍 Где тренировка?")
+    await state.set_state(NewTraining.location)
+
+@dp.message(NewTraining.location)
+async def process_training_location(message: types.Message, state: FSMContext):
+    await state.update_data(location=message.text.strip())
+    await message.answer("👥 Максимальное число игроков (например: 20)")
+    await state.set_state(NewTraining.max_players)
+
+@dp.message(NewTraining.max_players)
+async def process_training_max_players(message: types.Message, state: FSMContext):
+    if not message.text.strip().isdigit():
+        await message.answer("❌ Введи число (например: 20)")
+        return
+    await state.update_data(max_players=int(message.text.strip()))
+    await message.answer("📝 Описание (или «-» если не нужно)")
+    await state.set_state(NewTraining.description)
+
+@dp.message(NewTraining.description)
+async def process_training_description(message: types.Message, state: FSMContext):
+    desc = message.text.strip()
+    if desc == "-":
+        desc = ""
+
+    data = await state.get_data()
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute(
+            "INSERT INTO trainings (datetime, location, max_players, description) VALUES (?, ?, ?, ?)",
+            (data["datetime"], data["location"], data["max_players"], desc)
+        )
+        await db.commit()
+        training_id = cursor.lastrowid
+
+    await message.answer(
+        f"✅ Тренировка создана!\n\n"
+        f"📅 {data['datetime']}\n"
+        f"📍 {data['location']}\n"
+        f"👥 Мест: {data['max_players']}\n"
+        f"ID: <b>{training_id}</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+# === /trainings ===
+@dp.message(Command("trainings"))
+async def cmd_trainings(message: types.Message):
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute("""
+            SELECT id, datetime, location, max_players FROM trainings ORDER BY datetime
+        """)
+        rows = await cursor.fetchall()
+
+        if not rows:
+            await message.answer("Нет запланированных тренировок.")
+            return
+
+        text = "🏒 <b>Ближайшие тренировки:</b>\n\n"
+        for row in rows:
+            training_id, dt, loc, max_p = row
+            reg_cursor = await db.execute("SELECT COUNT(*) FROM registrations WHERE training_id = ?", (training_id,))
+            count = (await reg_cursor.fetchone())[0]
+            text += f"ID: {training_id} | {dt} | {loc} | {count}/{max_p} игроков\n"
+
+        await message.answer(text, parse_mode="HTML")
+
+# === /join ===
+@dp.message(Command("join"))
+async def cmd_join(message: types.Message):
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        await message.answer("Используй: /join <ID_тренировки>")
+        return
+
+    training_id = int(args[1])
+    user_id = message.from_user.id
+
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute("SELECT 1 FROM players WHERE user_id = ?", (user_id,))
+        player = await cursor.fetchone()
+        if not player:
+            await message.answer("Ты должен быть зарегистрирован как игрок. Напиши /start")
+            return
+
+        cursor = await db.execute("SELECT max_players FROM trainings WHERE id = ?", (training_id,))
+        tr = await cursor.fetchone()
+        if not tr:
+            await message.answer("Тренировка с таким ID не найдена.")
+            return
+
+        max_players = tr[0]
+        cursor = await db.execute("SELECT COUNT(*) FROM registrations WHERE training_id = ?", (training_id,))
+        current_count = (await cursor.fetchone())[0]
+
+        if current_count >= max_players:
+            await message.answer("❌ На этой тренировке уже нет мест.")
+            return
+
+        try:
+            await db.execute("INSERT INTO registrations (user_id, training_id) VALUES (?, ?)", (user_id, training_id))
+            await db.commit()
+            await message.answer(f"✅ Ты записан на тренировку ID {training_id}!")
+        except aiosqlite.IntegrityError:
+            await message.answer("Ты уже записан на эту тренировку.")
 
 # === /profile ===
 @dp.message(Command("profile"))
@@ -220,22 +334,43 @@ async def show_profile(message: types.Message):
 
     await message.answer("Ты не зарегистрирован. Напиши /start")
 
-# === /restart — ПОЛНЫЙ СБРОС ===
+# === /restart — полный сброс ===
 @dp.message(Command("restart"))
 async def cmd_restart(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-
     async with aiosqlite.connect("hockey.db") as db:
         await db.execute("DELETE FROM players WHERE user_id = ?", (user_id,))
         await db.execute("DELETE FROM coaches WHERE user_id = ?", (user_id,))
         await db.commit()
 
     await state.clear()
-
     await message.answer(
         "🔄 Твой профиль удалён.\n\nПривет! Кто ты?",
         reply_markup=get_role_keyboard()
     )
+
+# === ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ===
+async def is_coach(user_id: int) -> bool:
+    async with aiosqlite.connect("hockey.db") as db:
+        cursor = await db.execute("SELECT 1 FROM coaches WHERE user_id = ?", (user_id,))
+        row = await cursor.fetchone()
+        return row is not None
+
+# === УНИВЕРСАЛЬНЫЙ ОБРАБОТЧИК (последний!) ===
+@dp.message()
+async def fallback_handler(message: types.Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state is not None:
+        await state.clear()
+        await message.answer(
+            "⚠️ Произошла ошибка. Давай начнём заново.\n\n"
+            "Напиши /start или выбери роль:",
+            reply_markup=get_role_keyboard()
+        )
+    else:
+        await message.answer(
+            "Пожалуйста, используй команды:\n/start — начать\n/restart — сбросить профиль"
+        )
 
 # === MAIN ===
 async def main():
