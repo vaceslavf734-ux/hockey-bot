@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 
 # === Конфигурация ===
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
 DATABASE = "hockey.db"
 COACH_PASSWORD = "1234"
 
