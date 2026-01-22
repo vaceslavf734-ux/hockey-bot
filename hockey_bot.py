@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 
 # === Конфигурация ===
-BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
+BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
 DATABASE = "hockey.db"
 COACH_PASSWORD = "1234"
 
@@ -23,7 +23,6 @@ class UserStates(StatesGroup):
     # Создание события
     waiting_for_event_datetime = State()
     waiting_for_event_location = State()
-    event_type = State()  # будет хранить 'training' или 'game'
 
 # === Инициализация бота ===
 bot = Bot(token=BOT_TOKEN)
@@ -75,6 +74,7 @@ def get_coach_menu():
         keyboard=[
             [KeyboardButton(text="🏒 Создать тренировку")],
             [KeyboardButton(text="🎮 Создать игру")],
+            [KeyboardButton(text="📋 Мои события")],
             [KeyboardButton(text="👥 Состав")]
         ],
         resize_keyboard=True,
@@ -82,7 +82,6 @@ def get_coach_menu():
     )
 
 def parse_datetime_input(text: str):
-    """Преобразует '12 12 2025 18:00' → '2025-12-12 18:00'"""
     pattern = r"(\d{1,2})\s+(\d{1,2})\s+(\d{4})\s+(\d{1,2}):(\d{2})"
     match = re.fullmatch(pattern, text.strip())
     if not match:
@@ -93,6 +92,17 @@ def parse_datetime_input(text: str):
         return dt.strftime("%Y-%m-%d %H:%M")
     except ValueError:
         return None
+
+async def get_coach_events(user_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT id, type, datetime, location
+            FROM events
+            WHERE created_by = ?
+            ORDER BY datetime
+        """, (user_id,))
+        rows = await cursor.fetchall()
+        return rows
 
 # === Обработчики ===
 
@@ -161,6 +171,16 @@ async def handle_coach_menu(message: types.Message, state: FSMContext):
         await state.update_data(event_type="game")
         await message.answer("📅 Введите дату и время игры в формате:\n`ДД ММ ГГГГ ЧЧ:ММ`\nНапример: `15 12 2025 19:30`", parse_mode="Markdown")
         await state.set_state(UserStates.waiting_for_event_datetime)
+    elif message.text == "📋 Мои события":
+        events = await get_coach_events(message.from_user.id)
+        if not events:
+            await message.answer("У вас пока нет созданных тренировок или игр.")
+        else:
+            lines = []
+            for i, (eid, etype, dt, loc) in enumerate(events, 1):
+                label = "🏒 Тренировка" if etype == "training" else "🎮 Игра"
+                lines.append(f"{i}. {label}\n   📅 {dt}\n   📍 {loc}\n")
+            await message.answer("Ваши события:\n\n" + "\n".join(lines))
     elif message.text == "👥 Состав":
         await message.answer("Просмотр состава (в разработке)...")
     else:
@@ -199,7 +219,6 @@ async def handle_event_location(message: types.Message, state: FSMContext):
     await message.answer(f"✅ {event_label.capitalize()} создана!\n📅 {event_datetime}\n📍 {location}", reply_markup=get_coach_menu())
     await state.set_state(UserStates.coach_menu)
 
-# Команда отмены (опционально)
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
