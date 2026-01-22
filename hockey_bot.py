@@ -5,7 +5,7 @@ from aiogram.types import Message
 from aiogram import F
 
 # Токен бота (замени на свой)
-BOT_TOKEN = "YOUR_BOT_TOKEN"
+BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
 
 # Путь к базе данных
 DB_PATH = 'hockey.db'
