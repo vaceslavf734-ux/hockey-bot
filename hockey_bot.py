@@ -345,13 +345,15 @@ async def handle_profile(message: Message):
         reply_markup=main_menu_keyboard()
     )
 
-# === /new_training ===
-async def cmd_new_training(message: types.Message, state: FSMContext):
-    if not await is_coach(message.from_user.id):
-        await message.answer("❌ Эта команда только для тренеров.")
+# === Кнопка "Создать тренировку" ===
+@dp.callback_query(lambda c: c.data == "create_training")
+async def cmd_create_training(callback_query: CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    if not await is_coach(user_id):
+        await callback_query.message.edit_text("❌ Эта функция только для тренеров.")
         return
 
-    sent = await message.answer(
+    sent = await callback_query.message.edit_text(
         "📅 Введи дату и время тренировки в формате:\n"
         "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
         "Пример: <code>05.02.2026 19:00</code>",
@@ -360,6 +362,7 @@ async def cmd_new_training(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.datetime)
 
+@dp.message(NewTraining.datetime)
 async def process_training_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -383,6 +386,7 @@ async def process_training_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.location)
 
+@dp.message(NewTraining.location)
 async def process_training_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -394,6 +398,7 @@ async def process_training_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.max_players)
 
+@dp.message(NewTraining.max_players)
 async def process_training_max_players(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -409,6 +414,7 @@ async def process_training_max_players(message: types.Message, state: FSMContext
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.description)
 
+@dp.message(NewTraining.description)
 async def process_training_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -444,13 +450,15 @@ async def process_training_description(message: types.Message, state: FSMContext
     )
     await state.clear()
 
-# === /new_game ===
-async def cmd_new_game(message: types.Message, state: FSMContext):
-    if not await is_coach(message.from_user.id):
-        await message.answer("❌ Эта команда только для тренеров.")
+# === Кнопка "Создать игру" ===
+@dp.callback_query(lambda c: c.data == "create_game")
+async def cmd_create_game(callback_query: CallbackQuery, state: FSMContext):
+    user_id = callback_query.from_user.id
+    if not await is_coach(user_id):
+        await callback_query.message.edit_text("❌ Эта функция только для тренеров.")
         return
 
-    sent = await message.answer(
+    sent = await callback_query.message.edit_text(
         "📅 Введи дату и время игры в формате:\n"
         "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
         "Пример: <code>05.02.2026 19:00</code>",
@@ -459,6 +467,7 @@ async def cmd_new_game(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.datetime)
 
+@dp.message(NewGame.datetime)
 async def process_game_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -482,6 +491,7 @@ async def process_game_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.location)
 
+@dp.message(NewGame.location)
 async def process_game_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -493,6 +503,7 @@ async def process_game_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.opponent)
 
+@dp.message(NewGame.opponent)
 async def process_game_opponent(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -504,6 +515,7 @@ async def process_game_opponent(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.description)
 
+@dp.message(NewGame.description)
 async def process_game_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -655,30 +667,6 @@ async def button_callback(callback_query: CallbackQuery):
                 reply_markup=back_keyboard()
             )
 
-    elif data == "create_training":
-        if await is_coach(user_id):
-            await callback_query.message.edit_text(
-                "📝 Чтобы создать тренировку, отправь команду:\n"
-                "/new_training"
-            )
-        else:
-            await callback_query.message.edit_text(
-                "❌ У тебя нет прав тренера.",
-                reply_markup=back_keyboard()
-            )
-
-    elif data == "create_game":
-        if await is_coach(user_id):
-            await callback_query.message.edit_text(
-                "📝 Чтобы создать игру, отправь команду:\n"
-                "/new_game"
-            )
-        else:
-            await callback_query.message.edit_text(
-                "❌ У тебя нет прав тренера.",
-                reply_markup=back_keyboard()
-            )
-
     elif data == "list_participants":
         if await is_coach(user_id):
             trainings = await get_trainings()
@@ -769,13 +757,13 @@ async def main():
     dp = Dispatcher()
 
     # Регистрируем FSM-хендлеры
-    dp.message.register(cmd_new_training, Command("new_training"))
+    dp.callback_query.register(cmd_create_training, lambda c: c.data == "create_training")
     dp.message.register(process_training_datetime, NewTraining.datetime)
     dp.message.register(process_training_location, NewTraining.location)
     dp.message.register(process_training_max_players, NewTraining.max_players)
     dp.message.register(process_training_description, NewTraining.description)
 
-    dp.message.register(cmd_new_game, Command("new_game"))
+    dp.callback_query.register(cmd_create_game, lambda c: c.data == "create_game")
     dp.message.register(process_game_datetime, NewGame.datetime)
     dp.message.register(process_game_location, NewGame.location)
     dp.message.register(process_game_opponent, NewGame.opponent)
