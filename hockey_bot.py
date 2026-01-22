@@ -346,7 +346,6 @@ async def handle_profile(message: Message):
     )
 
 # === Кнопка "Создать тренировку" ===
-@dp.callback_query(lambda c: c.data == "create_training")
 async def cmd_create_training(callback_query: CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
     if not await is_coach(user_id):
@@ -362,7 +361,6 @@ async def cmd_create_training(callback_query: CallbackQuery, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.datetime)
 
-@dp.message(NewTraining.datetime)
 async def process_training_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -386,7 +384,6 @@ async def process_training_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.location)
 
-@dp.message(NewTraining.location)
 async def process_training_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -398,7 +395,6 @@ async def process_training_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.max_players)
 
-@dp.message(NewTraining.max_players)
 async def process_training_max_players(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -414,7 +410,6 @@ async def process_training_max_players(message: types.Message, state: FSMContext
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.description)
 
-@dp.message(NewTraining.description)
 async def process_training_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -451,7 +446,6 @@ async def process_training_description(message: types.Message, state: FSMContext
     await state.clear()
 
 # === Кнопка "Создать игру" ===
-@dp.callback_query(lambda c: c.data == "create_game")
 async def cmd_create_game(callback_query: CallbackQuery, state: FSMContext):
     user_id = callback_query.from_user.id
     if not await is_coach(user_id):
@@ -467,7 +461,6 @@ async def cmd_create_game(callback_query: CallbackQuery, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.datetime)
 
-@dp.message(NewGame.datetime)
 async def process_game_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -491,7 +484,6 @@ async def process_game_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.location)
 
-@dp.message(NewGame.location)
 async def process_game_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -503,7 +495,6 @@ async def process_game_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.opponent)
 
-@dp.message(NewGame.opponent)
 async def process_game_opponent(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -515,7 +506,6 @@ async def process_game_opponent(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.description)
 
-@dp.message(NewGame.description)
 async def process_game_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
