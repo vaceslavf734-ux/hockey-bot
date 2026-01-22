@@ -189,7 +189,7 @@ async def button_callback(callback_query: types.CallbackQuery):
 async def main():
     await init_db()
 
-    bot = Bot(token=8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs)
+    bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
     dp.message.register(start_command, Command("start"))
