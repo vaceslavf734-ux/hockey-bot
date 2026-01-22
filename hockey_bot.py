@@ -16,7 +16,7 @@ DB_PATH = 'hockey.db'
 COACH_PASSWORD = "1234"
 
 # Глобальный словарь для отслеживания состояний
-user_states = {}  # {user_id: "waiting_for_coach_password", "waiting_for_coach_name", "waiting_for_training", "waiting_for_game"}
+user_states = {}  # {user_id: {"stage": "waiting_for_date", "data": {...}}}
 
 # Инициализация БД
 async def init_db():
@@ -223,6 +223,11 @@ def back_keyboard():
     keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# Клавиатура "Без описания"
+def no_description_keyboard():
+    keyboard = [[types.InlineKeyboardButton(text="🚫 Без описания", callback_data="no_description")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
@@ -277,7 +282,7 @@ async def handle_role_selection(callback_query: CallbackQuery):
         await callback_query.message.edit_text(
             "🔐 Введи пароль тренера:"
         )
-        user_states[user_id] = "waiting_for_coach_password"
+        user_states[user_id] = {"stage": "waiting_for_coach_password"}
 
 # Обработка сообщения с профилем (для игрока или тренера)
 async def handle_profile(message: Message):
@@ -285,17 +290,17 @@ async def handle_profile(message: Message):
     text = message.text.strip()
 
     # Если ждём пароль тренера
-    if user_id in user_states and user_states[user_id] == "waiting_for_coach_password":
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_coach_password":
         if text == COACH_PASSWORD:
             await message.answer("✅ Пароль верен!\n\nВведите имя и фамилию тренера:")
-            user_states[user_id] = "waiting_for_coach_name"
+            user_states[user_id] = {"stage": "waiting_for_coach_name"}
         else:
             await message.answer("❌ Неверный пароль.")
             del user_states[user_id]
         return
 
     # Если ждём имя тренера
-    if user_id in user_states and user_states[user_id] == "waiting_for_coach_name":
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_coach_name":
         parts = text.split()
         if len(parts) < 2:
             await message.answer("❌ Неверный формат. Нужно: Имя Фамилия")
@@ -479,13 +484,11 @@ async def button_callback(callback_query: CallbackQuery):
     elif data == "create_training":
         if await is_coach(user_id):
             await callback_query.message.edit_text(
-                "📝 Отправь информацию о тренировке в формате:\n"
-                "`Дата Время Место`\n\n"
-                "Описание (необязательно) — отправь отдельным сообщением.\n\n"
-                "Пример: `2026-02-01 19:00 Ледовая арена`",
-                reply_markup=back_keyboard()
+                "📅 Введи дату и время тренировки в формате:\n"
+                "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
+                "Пример: `2026-02-01 19:00`"
             )
-            user_states[user_id] = "waiting_for_training_info"
+            user_states[user_id] = {"stage": "waiting_for_training_datetime", "type": "training"}
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -495,13 +498,11 @@ async def button_callback(callback_query: CallbackQuery):
     elif data == "create_game":
         if await is_coach(user_id):
             await callback_query.message.edit_text(
-                "📝 Отправь информацию об игре в формате:\n"
-                "`Дата Время Место Соперник`\n\n"
-                "Описание (необязательно) — отправь отдельным сообщением.\n\n"
-                "Пример: `2026-02-05 18:00 Ледовая арена Авангард`",
-                reply_markup=back_keyboard()
+                "📅 Введи дату и время игры в формате:\n"
+                "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
+                "Пример: `2026-02-05 18:00`"
             )
-            user_states[user_id] = "waiting_for_game_info"
+            user_states[user_id] = {"stage": "waiting_for_game_datetime", "type": "game"}
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -551,20 +552,53 @@ async def button_callback(callback_query: CallbackQuery):
             reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
         )
 
+    elif data == "no_description":
+        if user_id in user_states:
+            state = user_states[user_id]
+            if state.get("stage") == "waiting_for_description":
+                # Создаём событие без описания
+                event_type = state["type"]
+                if event_type == "training":
+                    date = state["date"]
+                    time = state["time"]
+                    place = state["place"]
+                    await create_training(date, time, place, description="")
+                    await callback_query.message.edit_text(
+                        f"✅ Тренировка создана:\n{date} | {time} | {place}"
+                    )
+                elif event_type == "game":
+                    date = state["date"]
+                    time = state["time"]
+                    place = state["place"]
+                    opponent = state["opponent"]
+                    await create_game(date, time, place, opponent, description="")
+                    await callback_query.message.edit_text(
+                        f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}"
+                    )
+                # Очищаем состояние
+                del user_states[user_id]
+                # Отправляем главное меню
+                profile = await get_player(user_id)
+                await callback_query.message.answer(
+                    f"👋 Привет, {profile['first_name']}!\n"
+                    f"Ты в системе хоккейной команды.\n\n"
+                    "Выбери действие:",
+                    reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
+                )
+
 # Обработка сообщений для создания тренировки/игры
 async def handle_create_event(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # Если ждём информацию о тренировке
-    if user_id in user_states and user_states[user_id] == "waiting_for_training_info":
-        parts = text.split(" ", 3)
-        if len(parts) < 3:
-            await message.answer("❌ Неверный формат. Нужно: Дата Время Место")
+    # Если ждём дату и время тренировки
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_training_datetime":
+        parts = text.split(" ", 1)
+        if len(parts) != 2:
+            await message.answer("❌ Неверный формат. Нужно: Дата Время")
             return
 
-        date, time, place = parts[0], parts[1], parts[2]
-        description = parts[3] if len(parts) > 3 else ""
+        date, time = parts[0], parts[1]
 
         # Проверим формат даты
         try:
@@ -573,23 +607,47 @@ async def handle_create_event(message: Message):
             await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
             return
 
-        await create_training(date, time, place, description)
-
-        # Очищаем состояние
-        del user_states[user_id]
-
-        await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {place}")
-        return
-
-    # Если ждём информацию об игре
-    if user_id in user_states and user_states[user_id] == "waiting_for_game_info":
-        parts = text.split(" ", 4)
-        if len(parts) < 4:
-            await message.answer("❌ Неверный формат. Нужно: Дата Время Место Соперник")
+        # Проверим формат времени
+        try:
+            datetime.strptime(time, "%H:%M")
+        except ValueError:
+            await message.answer("❌ Неверный формат времени. Используй: ЧЧ:ММ")
             return
 
-        date, time, place, opponent = parts[0], parts[1], parts[2], parts[3]
-        description = parts[4] if len(parts) > 4 else ""
+        # Сохраняем данные
+        user_states[user_id]["date"] = date
+        user_states[user_id]["time"] = time
+        user_states[user_id]["stage"] = "waiting_for_training_place"
+
+        await message.answer(
+            "📍 Введи место проведения тренировки:\n\n"
+            "Пример: Ледовая арена"
+        )
+        return
+
+    # Если ждём место тренировки
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_training_place":
+        place = text
+
+        # Сохраняем место
+        user_states[user_id]["place"] = place
+        user_states[user_id]["stage"] = "waiting_for_description"
+
+        await message.answer(
+            "📝 Описание (необязательно):\n\n"
+            "Отправь описание или нажми кнопку «Без описания»",
+            reply_markup=no_description_keyboard()
+        )
+        return
+
+    # Если ждём дату и время игры
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_game_datetime":
+        parts = text.split(" ", 1)
+        if len(parts) != 2:
+            await message.answer("❌ Неверный формат. Нужно: Дата Время")
+            return
+
+        date, time = parts[0], parts[1]
 
         # Проверим формат даты
         try:
@@ -598,13 +656,86 @@ async def handle_create_event(message: Message):
             await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
             return
 
-        await create_game(date, time, place, opponent, description)
+        # Проверим формат времени
+        try:
+            datetime.strptime(time, "%H:%M")
+        except ValueError:
+            await message.answer("❌ Неверный формат времени. Используй: ЧЧ:ММ")
+            return
+
+        # Сохраняем данные
+        user_states[user_id]["date"] = date
+        user_states[user_id]["time"] = time
+        user_states[user_id]["stage"] = "waiting_for_game_place"
+
+        await message.answer(
+            "📍 Введи место проведения игры:\n\n"
+            "Пример: Ледовая арена"
+        )
+        return
+
+    # Если ждём место игры
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_game_place":
+        place = text
+
+        # Сохраняем место
+        user_states[user_id]["place"] = place
+        user_states[user_id]["stage"] = "waiting_for_opponent"
+
+        await message.answer(
+            "🆚 Введи название соперника:\n\n"
+            "Пример: Авангард"
+        )
+        return
+
+    # Если ждём соперника
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_opponent":
+        opponent = text
+
+        # Сохраняем соперника
+        user_states[user_id]["opponent"] = opponent
+        user_states[user_id]["stage"] = "waiting_for_description"
+
+        await message.answer(
+            "📝 Описание (необязательно):\n\n"
+            "Отправь описание или нажми кнопку «Без описания»",
+            reply_markup=no_description_keyboard()
+        )
+        return
+
+    # Если ждём описание (для тренировки или игры)
+    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_description":
+        description = text
+
+        # Создаём событие
+        state = user_states[user_id]
+        event_type = state["type"]
+
+        if event_type == "training":
+            date = state["date"]
+            time = state["time"]
+            place = state["place"]
+            await create_training(date, time, place, description)
+            await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {place}")
+        elif event_type == "game":
+            date = state["date"]
+            time = state["time"]
+            place = state["place"]
+            opponent = state["opponent"]
+            await create_game(date, time, place, opponent, description)
+            await message.answer(f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}")
 
         # Очищаем состояние
         del user_states[user_id]
 
-        await message.answer(f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}")
-        return
+        # Отправляем главное меню
+        profile = await get_player(user_id)
+        await message.answer(
+            f"👋 Привет, {profile['first_name']}!\n"
+            f"Ты в системе хоккейной команды.\n\n"
+            "Выбери действие:",
+            reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
+        )
 
 # Функция для отправки уведомлений (в фоне)
 async def send_reminders(bot):
@@ -659,7 +790,7 @@ async def main():
     dp.message.register(handle_profile, F.text & ~F.command)
     dp.message.register(handle_create_event, F.text & ~F.command)
     dp.callback_query.register(handle_role_selection, lambda c: c.data in ["role_player", "role_coach"])
-    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
+    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main", "no_description"] or c.data.startswith("signup_"))
 
     print("✅ Бот запущен. Ждём сообщений...")
     await dp.start_polling(bot)
