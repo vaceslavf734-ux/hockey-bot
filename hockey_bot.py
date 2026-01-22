@@ -5,8 +5,8 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram import F
 import asyncio
 
-# Токен бота (замени на свой)
-BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"  # ← ЗАМЕНИ НА РЕАЛЬНЫЙ ТОКЕН!
+# Токен бота
+BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
 
 # Путь к базе данных
 DB_PATH = 'hockey.db'
@@ -53,6 +53,17 @@ async def get_player(user_id):
             }
         return None
 
+# Получить всех игроков
+async def get_all_players():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('''
+            SELECT first_name, last_name, jersey_number
+            FROM players
+            ORDER BY jersey_number ASC
+        ''')
+        rows = await cursor.fetchall()
+        return rows
+
 # Клавиатура главного меню
 def main_menu_keyboard():
     keyboard = [
@@ -67,13 +78,11 @@ def main_menu_keyboard():
 async def start_command(message: Message):
     user_id = message.from_user.id
     if await player_exists(user_id):
-        # Удаляем предыдущее сообщение (если есть)
         try:
             await message.delete()
         except:
-            pass  # Если не удалось удалить — игнорируем
+            pass
 
-        # Отправляем главное меню
         profile = await get_player(user_id)
         await message.answer(
             f"👋 Привет, {profile['first_name']}!\n"
@@ -82,7 +91,6 @@ async def start_command(message: Message):
             reply_markup=main_menu_keyboard()
         )
     else:
-        # Удаляем предыдущее сообщение (если есть)
         try:
             await message.delete()
         except:
@@ -99,37 +107,31 @@ async def start_command(message: Message):
 async def handle_profile(message: Message):
     user_id = message.from_user.id
 
-    # Если профиль уже есть — игнорируем
     if await player_exists(user_id):
         return
 
     text = message.text.strip()
 
-    # Разбиваем текст
     parts = text.split()
     if len(parts) < 3:
         await message.answer("❌ Неверный формат. Нужно: Имя Фамилия Номер")
         return
 
     try:
-        # Последнее слово — номер
         jersey_number = int(parts[-1])
         first_name = parts[0]
-        last_name = ' '.join(parts[1:-1])  # На случай, если фамилия состоит из двух слов
+        last_name = ' '.join(parts[1:-1])
     except ValueError:
         await message.answer("❌ Номер должен быть числом!")
         return
 
-    # Сохраняем
     await save_player(user_id, first_name, last_name, jersey_number)
 
-    # Удаляем сообщение с профилем (чтобы не мешало)
     try:
         await message.delete()
     except:
         pass
 
-    # Отправляем главное меню
     await message.answer(
         f"🎉 Профиль создан!\n"
         f"Имя: {first_name}\n"
@@ -144,7 +146,6 @@ async def button_callback(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
 
-    # Удаляем сообщение с кнопками (чтобы не захламлять чат)
     try:
         await callback_query.message.delete()
     except:
@@ -169,7 +170,14 @@ async def button_callback(callback_query: types.CallbackQuery):
         await callback_query.message.answer("🎮 Здесь будет расписание игр.")
 
     elif data == "team":
-        await callback_query.message.answer("📋 Здесь будет состав команды.")
+        players = await get_all_players()
+        if not players:
+            await callback_query.message.answer("📋 Состав пока пуст.")
+        else:
+            text = "📋 <b>Состав команды:</b>\n\n"
+            for idx, (first, last, num) in enumerate(players, 1):
+                text += f"{idx}. {first} {last} (#{num})\n"
+            await callback_query.message.answer(text, parse_mode="HTML")
 
     # Отправляем новое меню
     await callback_query.message.answer(
@@ -181,7 +189,7 @@ async def button_callback(callback_query: types.CallbackQuery):
 async def main():
     await init_db()
 
-    bot = Bot(token=BOT_TOKEN)
+    bot = Bot(token=8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs)
     dp = Dispatcher()
 
     dp.message.register(start_command, Command("start"))
