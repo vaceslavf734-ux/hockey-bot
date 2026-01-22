@@ -346,7 +346,6 @@ async def handle_profile(message: Message):
     )
 
 # === /new_training ===
-@dp.message(Command("new_training"))
 async def cmd_new_training(message: types.Message, state: FSMContext):
     if not await is_coach(message.from_user.id):
         await message.answer("❌ Эта команда только для тренеров.")
@@ -361,7 +360,6 @@ async def cmd_new_training(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.datetime)
 
-@dp.message(NewTraining.datetime)
 async def process_training_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -385,7 +383,6 @@ async def process_training_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.location)
 
-@dp.message(NewTraining.location)
 async def process_training_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -397,7 +394,6 @@ async def process_training_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.max_players)
 
-@dp.message(NewTraining.max_players)
 async def process_training_max_players(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -413,7 +409,6 @@ async def process_training_max_players(message: types.Message, state: FSMContext
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewTraining.description)
 
-@dp.message(NewTraining.description)
 async def process_training_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -450,7 +445,6 @@ async def process_training_description(message: types.Message, state: FSMContext
     await state.clear()
 
 # === /new_game ===
-@dp.message(Command("new_game"))
 async def cmd_new_game(message: types.Message, state: FSMContext):
     if not await is_coach(message.from_user.id):
         await message.answer("❌ Эта команда только для тренеров.")
@@ -465,7 +459,6 @@ async def cmd_new_game(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.datetime)
 
-@dp.message(NewGame.datetime)
 async def process_game_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -489,7 +482,6 @@ async def process_game_datetime(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.location)
 
-@dp.message(NewGame.location)
 async def process_game_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -501,7 +493,6 @@ async def process_game_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.opponent)
 
-@dp.message(NewGame.opponent)
 async def process_game_opponent(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -513,7 +504,6 @@ async def process_game_opponent(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(NewGame.description)
 
-@dp.message(NewGame.description)
 async def process_game_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
@@ -772,9 +762,9 @@ async def send_reminders(bot):
 
 # Основная функция
 async def main():
+    global bot
     await init_db()
 
-    global bot
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
@@ -791,15 +781,15 @@ async def main():
     dp.message.register(process_game_opponent, NewGame.opponent)
     dp.message.register(process_game_description, NewGame.description)
 
-    # Запускаем задачу для напоминаний
-    asyncio.create_task(send_reminders(bot))
-
     # Регистрируем остальные хендлеры
     dp.message.register(start_command, Command("start"))
     dp.message.register(restart_command, Command("restart"))
     dp.message.register(handle_profile, F.text & ~F.command)
     dp.callback_query.register(handle_role_selection, lambda c: c.data in ["role_player", "role_coach"])
     dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
+
+    # Запускаем задачу для напоминаний
+    asyncio.create_task(send_reminders(bot))
 
     print("✅ Бот запущен. Ждём сообщений...")
     await dp.start_polling(bot)
