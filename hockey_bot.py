@@ -1,6 +1,6 @@
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command, Filter
+from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram import F
 import asyncio
@@ -14,6 +14,9 @@ DB_PATH = 'hockey.db'
 
 # Пароль для тренера
 COACH_PASSWORD = "1234"
+
+# Глобальный словарь для отслеживания состояний
+waiting_for_coach_name = set()
 
 # Инициализация БД
 async def init_db():
@@ -163,6 +166,14 @@ async def get_training_participants(training_id):
         rows = await cursor.fetchall()
         return rows
 
+# Клавиатура выбора роли
+def role_selection_keyboard():
+    keyboard = [
+        [types.InlineKeyboardButton(text="👤 Я игрок", callback_data="role_player")],
+        [types.InlineKeyboardButton(text="🎯 Я тренер", callback_data="role_coach")]
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
 # Клавиатура главного меню
 def main_menu_keyboard(is_coach=False):
     keyboard = [
@@ -180,13 +191,6 @@ def back_keyboard():
     keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# Фильтр: только тренеры
-class IsCoachFilter(Filter):
-    async def __call__(self, message: Message) -> bool:
-        if not message.from_user:
-            return False
-        return await is_coach(message.from_user.id)
-
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
@@ -201,10 +205,8 @@ async def start_command(message: Message):
         )
     else:
         await message.answer(
-            "👋 Привет! Давай создадим твой профиль.\n\n"
-            "Напиши в одном сообщении:\n"
-            "**Имя Фамилия Номер**\n\n"
-            "Пример: `Вячеслав Федоров 19`"
+            "👋 Привет! Кто ты?",
+            reply_markup=role_selection_keyboard()
         )
 
 # Команда /restart
@@ -216,18 +218,44 @@ async def restart_command(message: Message):
         await db.execute('DELETE FROM players WHERE user_id = ?', (user_id,))
         await db.commit()
 
+    # Убираем из ожидания
+    if user_id in waiting_for_coach_name:
+        waiting_for_coach_name.remove(user_id)
+
     await message.answer(
         "🔄 Профиль удалён.\n"
         "Создай его заново.\n\n"
-        "Напиши: **Имя Фамилия Номер**\n\n"
-        "Пример: `Вячеслав Федоров 19`"
+        "Кто ты?",
+        reply_markup=role_selection_keyboard()
     )
 
-# Обработка сообщения с профилем
-async def handle_profile(message: Message):
+# Обработка выбора роли
+async def handle_role_selection(callback_query: CallbackQuery):
+    data = callback_query.data
+    user_id = callback_query.from_user.id
+
+    if data == "role_player":
+        await callback_query.message.edit_text(
+            "📝 Введи своё имя, фамилию и хоккейный номер через пробел:\n\n"
+            "<code>Имя Фамилия Номер</code>\n\n"
+            "Пример: <code>Вячеслав Федоров 19</code>",
+            parse_mode="HTML"
+        )
+    elif data == "role_coach":
+        await callback_query.message.edit_text(
+            "🔐 Введи пароль тренера:"
+        )
+
+# Обработка сообщения с профилем (для игрока)
+async def handle_player_profile(message: Message):
     user_id = message.from_user.id
 
+    # Проверяем, есть ли уже профиль
     if await player_exists(user_id):
+        return
+
+    # Проверяем, не пароль ли это (т.е. не тренер ли)
+    if message.text.strip() == COACH_PASSWORD:
         return
 
     text = message.text.strip()
@@ -245,7 +273,7 @@ async def handle_profile(message: Message):
         await message.answer("❌ Номер должен быть числом!")
         return
 
-    await save_player(user_id, first_name, last_name, jersey_number)
+    await save_player(user_id, first_name, last_name, jersey_number, is_coach=0)
 
     # Удаляем сообщение пользователя (с профилем)
     try:
@@ -255,7 +283,7 @@ async def handle_profile(message: Message):
 
     # Отправляем главное меню
     await message.answer(
-        f"🎉 Профиль создан!\n"
+        f"🎉 Профиль игрока создан!\n"
         f"Имя: {first_name}\n"
         f"Фамилия: {last_name}\n"
         f"Номер: {jersey_number}\n\n"
@@ -263,31 +291,66 @@ async def handle_profile(message: Message):
         reply_markup=main_menu_keyboard()
     )
 
-# Обработка сообщений с информацией о тренировке (для тренера)
-async def handle_create_training(message: Message):
+# Обработка сообщения с паролем (для тренера)
+async def handle_coach_password(message: Message):
     user_id = message.from_user.id
 
-    if not await is_coach(user_id):
+    # Проверяем, есть ли уже профиль
+    if await player_exists(user_id):
         return
 
     text = message.text.strip()
-    parts = text.split(" ", 2)
-    if len(parts) != 3:
-        await message.answer("❌ Неверный формат. Нужно: Дата Время Описание")
+
+    if text != COACH_PASSWORD:
+        await message.answer("❌ Неверный пароль.")
         return
 
-    date, time, desc = parts
+    # Добавляем в ожидание имени
+    waiting_for_coach_name.add(user_id)
 
-    # Проверим формат даты
+    await message.answer("✅ Пароль верен!\n\nВведите имя и фамилию тренера:")
+
+# Обработка сообщения с именем тренера
+async def handle_coach_profile(message: Message):
+    user_id = message.from_user.id
+
+    # Проверяем, есть ли уже профиль
+    if await player_exists(user_id):
+        return
+
+    # Проверяем, ждём ли мы имя от этого юзера
+    if user_id not in waiting_for_coach_name:
+        return
+
+    text = message.text.strip()
+
+    parts = text.split()
+    if len(parts) < 2:
+        await message.answer("❌ Неверный формат. Нужно: Имя Фамилия")
+        return
+
+    first_name = parts[0]
+    last_name = ' '.join(parts[1:])
+
+    await save_player(user_id, first_name, last_name, jersey_number=0, is_coach=1)
+
+    # Убираем из ожидания
+    waiting_for_coach_name.discard(user_id)
+
+    # Удаляем сообщение пользователя (с именем)
     try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
-        return
+        await message.delete()
+    except:
+        pass
 
-    await create_training(date, time, desc)
-
-    await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {desc}")
+    # Отправляем главное меню
+    await message.answer(
+        f"🎉 Профиль тренера создан!\n"
+        f"Имя: {first_name}\n"
+        f"Фамилия: {last_name}\n\n"
+        "Выбери действие:",
+        reply_markup=main_menu_keyboard(is_coach=True)
+    )
 
 # Обработка нажатий на кнопки
 async def button_callback(callback_query: CallbackQuery):
@@ -487,8 +550,10 @@ async def main():
 
     dp.message.register(start_command, Command("start"))
     dp.message.register(restart_command, Command("restart"))
-    dp.message.register(handle_profile, F.text & ~F.command)
-    dp.message.register(handle_create_training, F.text & IsCoachFilter())
+    dp.message.register(handle_player_profile, F.text & ~F.command & F.func(lambda m: not m.text.startswith("/") and m.from_user.id not in waiting_for_coach_name))
+    dp.message.register(handle_coach_password, F.text & ~F.command & F.text.equals(COACH_PASSWORD))
+    dp.message.register(handle_coach_profile, F.text & ~F.command & F.func(lambda m: m.from_user.id in waiting_for_coach_name))
+    dp.callback_query.register(handle_role_selection, lambda c: c.data in ["role_player", "role_coach"])
     dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games", "team", "coach_menu", "create_training", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
 
     print("✅ Бот запущен. Ждём сообщений...")
