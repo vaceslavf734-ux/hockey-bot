@@ -1,6 +1,6 @@
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from aiogram.filters import Command, Filter
 from aiogram.types import Message, CallbackQuery
 from aiogram import F
 import asyncio
@@ -180,6 +180,13 @@ def back_keyboard():
     keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# Фильтр: только тренеры
+class IsCoachFilter(Filter):
+    async def __call__(self, message: Message) -> bool:
+        if not message.from_user:
+            return False
+        return await is_coach(message.from_user.id)
+
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
@@ -255,6 +262,32 @@ async def handle_profile(message: Message):
         "Выбери действие:",
         reply_markup=main_menu_keyboard()
     )
+
+# Обработка сообщений с информацией о тренировке (для тренера)
+async def handle_create_training(message: Message):
+    user_id = message.from_user.id
+
+    if not await is_coach(user_id):
+        return
+
+    text = message.text.strip()
+    parts = text.split(" ", 2)
+    if len(parts) != 3:
+        await message.answer("❌ Неверный формат. Нужно: Дата Время Описание")
+        return
+
+    date, time, desc = parts
+
+    # Проверим формат даты
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
+        return
+
+    await create_training(date, time, desc)
+
+    await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {desc}")
 
 # Обработка нажатий на кнопки
 async def button_callback(callback_query: CallbackQuery):
@@ -360,7 +393,6 @@ async def button_callback(callback_query: CallbackQuery):
                 "Пример: `2026-02-01 19:00 Тренировка вратарей`",
                 reply_markup=back_keyboard()
             )
-            # Здесь можно добавить состояние ожидания
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -407,32 +439,6 @@ async def button_callback(callback_query: CallbackQuery):
             "Выбери действие:",
             reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
         )
-
-# Обработка сообщений с информацией о тренировке (для тренера)
-async def handle_create_training(message: Message):
-    user_id = message.from_user.id
-
-    if not await is_coach(user_id):
-        return
-
-    text = message.text.strip()
-    parts = text.split(" ", 2)
-    if len(parts) != 3:
-        await message.answer("❌ Неверный формат. Нужно: Дата Время Описание")
-        return
-
-    date, time, desc = parts
-
-    # Проверим формат даты
-    try:
-        datetime.strptime(date, "%Y-%m-%d")
-    except ValueError:
-        await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
-        return
-
-    await create_training(date, time, desc)
-
-    await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {desc}")
 
 # Функция для отправки уведомлений (в фоне)
 async def send_reminders(bot):
@@ -482,7 +488,7 @@ async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(restart_command, Command("restart"))
     dp.message.register(handle_profile, F.text & ~F.command)
-    dp.message.register(handle_create_training, F.text & F.func(lambda m: m.text and m.text.count(" ") >= 2 and await is_coach(m.from_user.id) if m.from_user else False))
+    dp.message.register(handle_create_training, F.text & IsCoachFilter())
     dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games", "team", "coach_menu", "create_training", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
 
     print("✅ Бот запущен. Ждём сообщений...")
