@@ -1,7 +1,7 @@
 import aiosqlite
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram import F
 import asyncio
 
@@ -67,22 +67,22 @@ async def get_all_players():
 # Клавиатура главного меню
 def main_menu_keyboard():
     keyboard = [
-        [InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
-        [InlineKeyboardButton(text="🏒 Тренировки", callback_data="trainings")],
-        [InlineKeyboardButton(text="🎮 Игры", callback_data="games")],
-        [InlineKeyboardButton(text="📋 Состав", callback_data="team")],
+        [types.InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
+        [types.InlineKeyboardButton(text="🏒 Тренировки", callback_data="trainings")],
+        [types.InlineKeyboardButton(text="🎮 Игры", callback_data="games")],
+        [types.InlineKeyboardButton(text="📋 Состав", callback_data="team")],
     ]
-    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+# Клавиатура "Назад"
+def back_keyboard():
+    keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
     if await player_exists(user_id):
-        try:
-            await message.delete()
-        except:
-            pass
-
         profile = await get_player(user_id)
         await message.answer(
             f"👋 Привет, {profile['first_name']}!\n"
@@ -91,11 +91,6 @@ async def start_command(message: Message):
             reply_markup=main_menu_keyboard()
         )
     else:
-        try:
-            await message.delete()
-        except:
-            pass
-
         await message.answer(
             "👋 Привет! Давай создадим твой профиль.\n\n"
             "Напиши в одном сообщении:\n"
@@ -127,11 +122,6 @@ async def handle_profile(message: Message):
 
     await save_player(user_id, first_name, last_name, jersey_number)
 
-    try:
-        await message.delete()
-    except:
-        pass
-
     await message.answer(
         f"🎉 Профиль создан!\n"
         f"Имя: {first_name}\n"
@@ -142,48 +132,60 @@ async def handle_profile(message: Message):
     )
 
 # Обработка нажатий на кнопки
-async def button_callback(callback_query: types.CallbackQuery):
+async def button_callback(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
-
-    try:
-        await callback_query.message.delete()
-    except:
-        pass
 
     if data == "profile":
         profile = await get_player(user_id)
         if profile:
-            await callback_query.message.answer(
+            await callback_query.message.edit_text(
                 f"👤 Твой профиль:\n"
                 f"Имя: {profile['first_name']}\n"
                 f"Фамилия: {profile['last_name']}\n"
-                f"Номер: {profile['jersey_number']}"
+                f"Номер: {profile['jersey_number']}",
+                reply_markup=back_keyboard()
             )
         else:
-            await callback_query.message.answer("❌ Профиль не найден.")
+            await callback_query.message.edit_text(
+                "❌ Профиль не найден.",
+                reply_markup=back_keyboard()
+            )
 
     elif data == "trainings":
-        await callback_query.message.answer("🏒 Здесь будет расписание тренировок.")
+        await callback_query.message.edit_text(
+            "🏒 Здесь будет расписание тренировок.",
+            reply_markup=back_keyboard()
+        )
 
     elif data == "games":
-        await callback_query.message.answer("🎮 Здесь будет расписание игр.")
+        await callback_query.message.edit_text(
+            "🎮 Здесь будет расписание игр.",
+            reply_markup=back_keyboard()
+        )
 
     elif data == "team":
         players = await get_all_players()
         if not players:
-            await callback_query.message.answer("📋 Состав пока пуст.")
+            text = "📋 Состав пока пуст."
         else:
             text = "📋 <b>Состав команды:</b>\n\n"
             for idx, (first, last, num) in enumerate(players, 1):
                 text += f"{idx}. {first} {last} (#{num})\n"
-            await callback_query.message.answer(text, parse_mode="HTML")
+        await callback_query.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=back_keyboard()
+        )
 
-    # Отправляем новое меню
-    await callback_query.message.answer(
-        "Выбери действие:",
-        reply_markup=main_menu_keyboard()
-    )
+    elif data == "back_to_main":
+        profile = await get_player(user_id)
+        await callback_query.message.edit_text(
+            f"👋 Привет, {profile['first_name']}!\n"
+            f"Ты в системе хоккейной команды.\n\n"
+            "Выбери действие:",
+            reply_markup=main_menu_keyboard()
+        )
 
 # Основная функция
 async def main():
@@ -194,7 +196,7 @@ async def main():
 
     dp.message.register(start_command, Command("start"))
     dp.message.register(handle_profile, F.text & ~F.text.startswith('/'))
-    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings", "games", "team"])
+    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings", "games", "team", "back_to_main"])
 
     print("✅ Бот запущен. Ждём сообщений...")
     await dp.start_polling(bot)
