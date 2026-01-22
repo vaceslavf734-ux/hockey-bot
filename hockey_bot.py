@@ -15,9 +15,6 @@ DB_PATH = 'hockey.db'
 # Пароль для тренера
 COACH_PASSWORD = "1234"
 
-# Глобальный словарь для отслеживания состояний
-user_states = {}  # {user_id: {"stage": "...", "data": {...}}}
-
 # Инициализация БД
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -64,6 +61,21 @@ async def init_db():
                 UNIQUE(user_id, training_id)
             )
         ''')
+        # Таблица черновиков событий (для многошагового создания)
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS draft_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL, -- 'training' или 'game'
+                status TEXT NOT NULL,     -- 'awaiting_datetime', 'awaiting_place', 'awaiting_opponent', 'awaiting_description'
+                date TEXT,
+                time TEXT,
+                place TEXT,
+                opponent TEXT,
+                description TEXT,
+                FOREIGN KEY (user_id) REFERENCES players (user_id)
+            )
+        ''')
         await db.commit()
 
 # Сохранение профиля
@@ -73,6 +85,52 @@ async def save_player(user_id, first_name, last_name, jersey_number, is_coach=0)
             INSERT OR REPLACE INTO players (user_id, first_name, last_name, jersey_number, is_coach)
             VALUES (?, ?, ?, ?, ?)
         ''', (user_id, first_name, last_name, jersey_number, is_coach))
+        await db.commit()
+
+# Создание черновика события
+async def create_draft_event(user_id, event_type):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            INSERT INTO draft_events (user_id, event_type, status)
+            VALUES (?, ?, ?)
+        ''', (user_id, event_type, "awaiting_datetime"))
+        await db.commit()
+
+# Обновление черновика
+async def update_draft_event(user_id, field, value):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f'''
+            UPDATE draft_events SET {field} = ?, status = ?
+            WHERE user_id = ? AND status != 'completed'
+        ''', (value, f"awaiting_{field}", user_id))
+        await db.commit()
+
+# Получение черновика
+async def get_draft_event(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('''
+            SELECT event_type, status, date, time, place, opponent, description
+            FROM draft_events
+            WHERE user_id = ?
+            AND status != 'completed'
+        ''', (user_id,))
+        row = await cursor.fetchone()
+        if row:
+            return {
+                "event_type": row[0],
+                "status": row[1],
+                "date": row[2],
+                "time": row[3],
+                "place": row[4],
+                "opponent": row[5],
+                "description": row[6]
+            }
+        return None
+
+# Удаление черновика
+async def delete_draft_event(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('DELETE FROM draft_events WHERE user_id = ?', (user_id,))
         await db.commit()
 
 # Проверка, существует ли игрок
@@ -253,11 +311,8 @@ async def restart_command(message: Message):
     # Удаляем профиль
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('DELETE FROM players WHERE user_id = ?', (user_id,))
+        await db.execute('DELETE FROM draft_events WHERE user_id = ?', (user_id,))
         await db.commit()
-
-    # Очищаем состояние
-    if user_id in user_states:
-        del user_states[user_id]
 
     await message.answer(
         "🔄 Профиль удалён.\n"
@@ -282,7 +337,6 @@ async def handle_role_selection(callback_query: CallbackQuery):
         await callback_query.message.edit_text(
             "🔐 Введи пароль тренера:"
         )
-        user_states[user_id] = {"stage": "waiting_for_coach_password"}
 
 # Обработка сообщения с профилем (для игрока или тренера)
 async def handle_profile(message: Message):
@@ -290,44 +344,27 @@ async def handle_profile(message: Message):
     text = message.text.strip()
 
     # Если ждём пароль тренера
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_coach_password":
+    draft = await get_draft_event(user_id)
+    if draft and draft["status"] == "awaiting_datetime":
         if text == COACH_PASSWORD:
             await message.answer("✅ Пароль верен!\n\nВведите имя и фамилию тренера:")
-            user_states[user_id] = {"stage": "waiting_for_coach_name"}
+            # Удаляем черновик, т.к. это был пароль
+            await delete_draft_event(user_id)
+            # Сохраняем профиль как тренер
+            parts = message.text.split()
+            if len(parts) >= 2:
+                first_name = parts[0]
+                last_name = ' '.join(parts[1:])
+                await save_player(user_id, first_name, last_name, jersey_number=0, is_coach=1)
+                await message.answer(
+                    f"🎉 Профиль тренера создан!\n"
+                    f"Имя: {first_name}\n"
+                    f"Фамилия: {last_name}\n\n"
+                    "Выбери действие:",
+                    reply_markup=main_menu_keyboard(is_coach=True)
+                )
         else:
             await message.answer("❌ Неверный пароль.")
-            del user_states[user_id]
-        return
-
-    # Если ждём имя тренера
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_coach_name":
-        parts = text.split()
-        if len(parts) < 2:
-            await message.answer("❌ Неверный формат. Нужно: Имя Фамилия")
-            return
-
-        first_name = parts[0]
-        last_name = ' '.join(parts[1:])
-
-        await save_player(user_id, first_name, last_name, jersey_number=0, is_coach=1)
-
-        # Очищаем состояние
-        del user_states[user_id]
-
-        # Удаляем сообщение пользователя (с именем)
-        try:
-            await message.delete()
-        except:
-            pass
-
-        # Отправляем главное меню
-        await message.answer(
-            f"🎉 Профиль тренера создан!\n"
-            f"Имя: {first_name}\n"
-            f"Фамилия: {last_name}\n\n"
-            "Выбери действие:",
-            reply_markup=main_menu_keyboard(is_coach=True)
-        )
         return
 
     # Если не ждём ничего — значит, это игрок
@@ -488,7 +525,7 @@ async def button_callback(callback_query: CallbackQuery):
                 "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
                 "Пример: `2026-02-01 19:00`"
             )
-            user_states[user_id] = {"stage": "waiting_for_training_datetime", "type": "training"}
+            await create_draft_event(user_id, "training")
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -502,7 +539,7 @@ async def button_callback(callback_query: CallbackQuery):
                 "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
                 "Пример: `2026-02-05 18:00`"
             )
-            user_states[user_id] = {"stage": "waiting_for_game_datetime", "type": "game"}
+            await create_draft_event(user_id, "game")
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -553,53 +590,50 @@ async def button_callback(callback_query: CallbackQuery):
         )
 
     elif data == "no_description":
-        if user_id in user_states:
-            state = user_states[user_id]
-            if state.get("stage") == "waiting_for_description":
-                # Создаём событие без описания
-                event_type = state["type"]
-                if event_type == "training":
-                    date = state["date"]
-                    time = state["time"]
-                    place = state["place"]
-                    await create_training(date, time, place, description="")
-                    await callback_query.message.edit_text(
-                        f"✅ Тренировка создана:\n{date} | {time} | {place}"
-                    )
-                elif event_type == "game":
-                    date = state["date"]
-                    time = state["time"]
-                    place = state["place"]
-                    opponent = state["opponent"]
-                    await create_game(date, time, place, opponent, description="")
-                    await callback_query.message.edit_text(
-                        f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}"
-                    )
-                # Очищаем состояние
-                del user_states[user_id]
-                # Отправляем главное меню
-                profile = await get_player(user_id)
-                await callback_query.message.answer(
-                    f"👋 Привет, {profile['first_name']}!\n"
-                    f"Ты в системе хоккейной команды.\n\n"
-                    "Выбери действие:",
-                    reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
+        draft = await get_draft_event(user_id)
+        if draft and draft["status"] == "awaiting_description":
+            event_type = draft["event_type"]
+            date = draft["date"]
+            time = draft["time"]
+            place = draft["place"]
+            description = ""
+
+            if event_type == "training":
+                await create_training(date, time, place, description)
+                await callback_query.message.edit_text(
+                    f"✅ Тренировка создана:\n{date} | {time} | {place}"
+                )
+            elif event_type == "game":
+                opponent = draft["opponent"]
+                await create_game(date, time, place, opponent, description)
+                await callback_query.message.edit_text(
+                    f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}"
                 )
 
-# Обработка сообщений для создания тренировки/игры
+            # Удаляем черновик
+            await delete_draft_event(user_id)
+
+            # Отправляем главное меню
+            profile = await get_player(user_id)
+            await callback_query.message.answer(
+                f"👋 Привет, {profile['first_name']}!\n"
+                f"Ты в системе хоккейной команды.\n\n"
+                "Выбери действие:",
+                reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
+            )
+
+# Обработка сообщений для создания событий
 async def handle_create_event(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # Если пользователь не в состоянии — игнорируем
-    if user_id not in user_states:
+    draft = await get_draft_event(user_id)
+    if not draft:
         return
 
-    state = user_states[user_id]
-    stage = state.get("stage")
+    status = draft["status"]
 
-    # Если ждём дату и время тренировки
-    if stage == "waiting_for_training_datetime":
+    if status == "awaiting_datetime":
         parts = text.split(" ", 1)
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Нужно: Дата Время")
@@ -621,118 +655,75 @@ async def handle_create_event(message: Message):
             await message.answer("❌ Неверный формат времени. Используй: ЧЧ:ММ")
             return
 
-        # Сохраняем данные
-        state["date"] = date
-        state["time"] = time
-        state["stage"] = "waiting_for_training_place"
+        # Обновляем черновик
+        await update_draft_event(user_id, "date", date)
+        await update_draft_event(user_id, "time", time)
 
-        await message.answer(
-            "📍 Введи место проведения тренировки:\n\n"
-            "Пример: Ледовая арена"
-        )
-        return
+        # Запрашиваем место
+        event_type = draft["event_type"]
+        if event_type == "training":
+            await message.answer(
+                "📍 Введи место проведения тренировки:\n\n"
+                "Пример: Ледовая арена"
+            )
+        elif event_type == "game":
+            await message.answer(
+                "📍 Введи место проведения игры:\n\n"
+                "Пример: Ледовая арена"
+            )
 
-    # Если ждём место тренировки
-    if stage == "waiting_for_training_place":
+    elif status == "awaiting_place":
         place = text
 
-        # Сохраняем место
-        state["place"] = place
-        state["stage"] = "waiting_for_description"
+        # Обновляем черновик
+        await update_draft_event(user_id, "place", place)
 
-        await message.answer(
-            "📝 Описание (необязательно):\n\n"
-            "Отправь описание или нажми кнопку «Без описания»",
-            reply_markup=no_description_keyboard()
-        )
-        return
+        # Запрашиваем следующий шаг
+        event_type = draft["event_type"]
+        if event_type == "training":
+            await message.answer(
+                "📝 Описание (необязательно):\n\n"
+                "Отправь описание или нажми кнопку «Без описания»",
+                reply_markup=no_description_keyboard()
+            )
+        elif event_type == "game":
+            await message.answer(
+                "🆚 Введи название соперника:\n\n"
+                "Пример: Авангард"
+            )
 
-    # Если ждём дату и время игры
-    if stage == "waiting_for_game_datetime":
-        parts = text.split(" ", 1)
-        if len(parts) != 2:
-            await message.answer("❌ Неверный формат. Нужно: Дата Время")
-            return
-
-        date, time = parts[0], parts[1]
-
-        # Проверим формат даты
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
-            return
-
-        # Проверим формат времени
-        try:
-            datetime.strptime(time, "%H:%M")
-        except ValueError:
-            await message.answer("❌ Неверный формат времени. Используй: ЧЧ:ММ")
-            return
-
-        # Сохраняем данные
-        state["date"] = date
-        state["time"] = time
-        state["stage"] = "waiting_for_game_place"
-
-        await message.answer(
-            "📍 Введи место проведения игры:\n\n"
-            "Пример: Ледовая арена"
-        )
-        return
-
-    # Если ждём место игры
-    if stage == "waiting_for_game_place":
-        place = text
-
-        # Сохраняем место
-        state["place"] = place
-        state["stage"] = "waiting_for_opponent"
-
-        await message.answer(
-            "🆚 Введи название соперника:\n\n"
-            "Пример: Авангард"
-        )
-        return
-
-    # Если ждём соперника
-    if stage == "waiting_for_opponent":
+    elif status == "awaiting_opponent":
         opponent = text
 
-        # Сохраняем соперника
-        state["opponent"] = opponent
-        state["stage"] = "waiting_for_description"
+        # Обновляем черновик
+        await update_draft_event(user_id, "opponent", opponent)
 
+        # Запрашиваем описание
         await message.answer(
             "📝 Описание (необязательно):\n\n"
             "Отправь описание или нажми кнопку «Без описания»",
             reply_markup=no_description_keyboard()
         )
-        return
 
-    # Если ждём описание (для тренировки или игры)
-    if stage == "waiting_for_description":
+    elif status == "awaiting_description":
         description = text
 
-        # Создаём событие
-        event_type = state["type"]
+        # Получаем данные из черновика
+        event_type = draft["event_type"]
+        date = draft["date"]
+        time = draft["time"]
+        place = draft["place"]
 
         if event_type == "training":
-            date = state["date"]
-            time = state["time"]
-            place = state["place"]
             await create_training(date, time, place, description)
             await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {place}")
         elif event_type == "game":
-            date = state["date"]
-            time = state["time"]
-            place = state["place"]
-            opponent = state["opponent"]
+            opponent = draft["opponent"]
             await create_game(date, time, place, opponent, description)
             await message.answer(f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}")
 
-        # Очищаем состояние
-        del user_states[user_id]
+        # Удаляем черновик
+        await delete_draft_event(user_id)
 
         # Отправляем главное меню
         profile = await get_player(user_id)
