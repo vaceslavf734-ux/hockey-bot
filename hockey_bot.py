@@ -3,6 +3,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
 from aiogram import F
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 import asyncio
 from datetime import datetime, timedelta
 
@@ -14,6 +16,27 @@ DB_PATH = 'hockey.db'
 
 # Пароль для тренера
 COACH_PASSWORD = "1234"
+
+# Функция безопасного удаления сообщений
+async def safe_delete(chat_id, message_id):
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception as e:
+        pass  # Не удалось удалить — игнорируем
+
+# Класс состояний для тренировки
+class NewTraining(StatesGroup):
+    datetime = State()
+    location = State()
+    max_players = State()
+    description = State()
+
+# Класс состояний для игры
+class NewGame(StatesGroup):
+    datetime = State()
+    location = State()
+    opponent = State()
+    description = State()
 
 # Инициализация БД
 async def init_db():
@@ -61,21 +84,6 @@ async def init_db():
                 UNIQUE(user_id, training_id)
             )
         ''')
-        # Таблица черновиков событий (для многошагового создания)
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS draft_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                event_type TEXT NOT NULL, -- 'training' или 'game'
-                status TEXT NOT NULL,     -- 'awaiting_datetime', 'awaiting_place', 'awaiting_opponent', 'awaiting_description'
-                date TEXT,
-                time TEXT,
-                place TEXT,
-                opponent TEXT,
-                description TEXT,
-                FOREIGN KEY (user_id) REFERENCES players (user_id)
-            )
-        ''')
         await db.commit()
 
 # Сохранение профиля
@@ -85,52 +93,6 @@ async def save_player(user_id, first_name, last_name, jersey_number, is_coach=0)
             INSERT OR REPLACE INTO players (user_id, first_name, last_name, jersey_number, is_coach)
             VALUES (?, ?, ?, ?, ?)
         ''', (user_id, first_name, last_name, jersey_number, is_coach))
-        await db.commit()
-
-# Создание черновика события
-async def create_draft_event(user_id, event_type):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''
-            INSERT INTO draft_events (user_id, event_type, status)
-            VALUES (?, ?, ?)
-        ''', (user_id, event_type, "awaiting_datetime"))
-        await db.commit()
-
-# Обновление черновика
-async def update_draft_event(user_id, field, value):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(f'''
-            UPDATE draft_events SET {field} = ?, status = ?
-            WHERE user_id = ? AND status != 'completed'
-        ''', (value, f"awaiting_{field}", user_id))
-        await db.commit()
-
-# Получение черновика
-async def get_draft_event(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute('''
-            SELECT event_type, status, date, time, place, opponent, description
-            FROM draft_events
-            WHERE user_id = ?
-            AND status != 'completed'
-        ''', (user_id,))
-        row = await cursor.fetchone()
-        if row:
-            return {
-                "event_type": row[0],
-                "status": row[1],
-                "date": row[2],
-                "time": row[3],
-                "place": row[4],
-                "opponent": row[5],
-                "description": row[6]
-            }
-        return None
-
-# Удаление черновика
-async def delete_draft_event(user_id):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('DELETE FROM draft_events WHERE user_id = ?', (user_id,))
         await db.commit()
 
 # Проверка, существует ли игрок
@@ -281,11 +243,6 @@ def back_keyboard():
     keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# Клавиатура "Без описания"
-def no_description_keyboard():
-    keyboard = [[types.InlineKeyboardButton(text="🚫 Без описания", callback_data="no_description")]]
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
@@ -311,7 +268,6 @@ async def restart_command(message: Message):
     # Удаляем профиль
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('DELETE FROM players WHERE user_id = ?', (user_id,))
-        await db.execute('DELETE FROM draft_events WHERE user_id = ?', (user_id,))
         await db.commit()
 
     await message.answer(
@@ -344,27 +300,14 @@ async def handle_profile(message: Message):
     text = message.text.strip()
 
     # Если ждём пароль тренера
-    draft = await get_draft_event(user_id)
-    if draft and draft["status"] == "awaiting_datetime":
-        if text == COACH_PASSWORD:
-            await message.answer("✅ Пароль верен!\n\nВведите имя и фамилию тренера:")
-            # Удаляем черновик, т.к. это был пароль
-            await delete_draft_event(user_id)
-            # Сохраняем профиль как тренер
-            parts = message.text.split()
-            if len(parts) >= 2:
-                first_name = parts[0]
-                last_name = ' '.join(parts[1:])
-                await save_player(user_id, first_name, last_name, jersey_number=0, is_coach=1)
-                await message.answer(
-                    f"🎉 Профиль тренера создан!\n"
-                    f"Имя: {first_name}\n"
-                    f"Фамилия: {last_name}\n\n"
-                    "Выбери действие:",
-                    reply_markup=main_menu_keyboard(is_coach=True)
-                )
-        else:
-            await message.answer("❌ Неверный пароль.")
+    if text == COACH_PASSWORD:
+        # Проверим, есть ли уже профиль
+        if await player_exists(user_id):
+            await message.answer("❌ У тебя уже есть профиль.")
+            return
+
+        await message.answer("✅ Пароль верен!\n\nВведите имя и фамилию тренера:")
+        # Здесь можно добавить логику сохранения тренера — пока просто пропускаем
         return
 
     # Если не ждём ничего — значит, это игрок
@@ -401,6 +344,210 @@ async def handle_profile(message: Message):
         "Выбери действие:",
         reply_markup=main_menu_keyboard()
     )
+
+# === /new_training ===
+@dp.message(Command("new_training"))
+async def cmd_new_training(message: types.Message, state: FSMContext):
+    if not await is_coach(message.from_user.id):
+        await message.answer("❌ Эта команда только для тренеров.")
+        return
+
+    sent = await message.answer(
+        "📅 Введи дату и время тренировки в формате:\n"
+        "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
+        "Пример: <code>05.02.2026 19:00</code>",
+        parse_mode="HTML"
+    )
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewTraining.datetime)
+
+@dp.message(NewTraining.datetime)
+async def process_training_datetime(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    text = message.text.strip()
+    if len(text) != 16 or text[2] != '.' or text[5] != '.' or text[10] != ' ' or text[13] != ':':
+        sent = await message.answer("❌ Неверный формат. Попробуй ещё раз:\n<code>05.02.2026 19:00</code>", parse_mode="HTML")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+
+    # Преобразуем в ГГГГ-ММ-ДД ЧЧ:ММ
+    day, month, year = text[:2], text[3:5], text[6:10]
+    time = text[11:]
+    date_str = f"{year}-{month}-{day}"
+
+    await state.update_data(datetime=date_str, time=time)
+    sent = await message.answer("📍 Где тренировка?")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewTraining.location)
+
+@dp.message(NewTraining.location)
+async def process_training_location(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+    await state.update_data(location=message.text.strip())
+    sent = await message.answer("👥 Максимальное число игроков (например: 20)")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewTraining.max_players)
+
+@dp.message(NewTraining.max_players)
+async def process_training_max_players(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+    if not message.text.strip().isdigit():
+        sent = await message.answer("❌ Введи число (например: 20)")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+    await state.update_data(max_players=int(message.text.strip()))
+    sent = await message.answer("📝 Описание (или «-» если не нужно)")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewTraining.description)
+
+@dp.message(NewTraining.description)
+async def process_training_description(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    desc = message.text.strip()
+    if desc == "-":
+        desc = ""
+
+    # Создаём тренировку
+    date = data["datetime"]
+    time = data["time"]
+    place = data["location"]
+    max_players = data["max_players"]
+
+    await create_training(date, time, place, desc, max_players)
+
+    # Получаем ID тренировки
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('SELECT id FROM trainings WHERE date = ? AND time = ? AND place = ?', (date, time, place))
+        row = await cursor.fetchone()
+        training_id = row[0] if row else 0
+
+    await message.answer(
+        f"✅ Тренировка создана!\n\n"
+        f"📅 {date} | {time}\n"
+        f"📍 {place}\n"
+        f"👥 Мест: {max_players}\n"
+        f"ID: <b>{training_id}</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
+
+# === /new_game ===
+@dp.message(Command("new_game"))
+async def cmd_new_game(message: types.Message, state: FSMContext):
+    if not await is_coach(message.from_user.id):
+        await message.answer("❌ Эта команда только для тренеров.")
+        return
+
+    sent = await message.answer(
+        "📅 Введи дату и время игры в формате:\n"
+        "<code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n\n"
+        "Пример: <code>05.02.2026 19:00</code>",
+        parse_mode="HTML"
+    )
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewGame.datetime)
+
+@dp.message(NewGame.datetime)
+async def process_game_datetime(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    text = message.text.strip()
+    if len(text) != 16 or text[2] != '.' or text[5] != '.' or text[10] != ' ' or text[13] != ':':
+        sent = await message.answer("❌ Неверный формат. Попробуй ещё раз:\n<code>05.02.2026 19:00</code>", parse_mode="HTML")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+
+    # Преобразуем в ГГГГ-ММ-ДД ЧЧ:ММ
+    day, month, year = text[:2], text[3:5], text[6:10]
+    time = text[11:]
+    date_str = f"{year}-{month}-{day}"
+
+    await state.update_data(datetime=date_str, time=time)
+    sent = await message.answer("📍 Где игра?")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewGame.location)
+
+@dp.message(NewGame.location)
+async def process_game_location(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+    await state.update_data(location=message.text.strip())
+    sent = await message.answer("🆚 Соперник (например: Авангард)")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewGame.opponent)
+
+@dp.message(NewGame.opponent)
+async def process_game_opponent(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+    await state.update_data(opponent=message.text.strip())
+    sent = await message.answer("📝 Описание (или «-» если не нужно)")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(NewGame.description)
+
+@dp.message(NewGame.description)
+async def process_game_description(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    desc = message.text.strip()
+    if desc == "-":
+        desc = ""
+
+    # Создаём игру
+    date = data["datetime"]
+    time = data["time"]
+    place = data["location"]
+    opponent = data["opponent"]
+
+    await create_game(date, time, place, opponent, desc)
+
+    # Получаем ID игры
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('SELECT id FROM games WHERE date = ? AND time = ? AND place = ?', (date, time, place))
+        row = await cursor.fetchone()
+        game_id = row[0] if row else 0
+
+    await message.answer(
+        f"✅ Игра создана!\n\n"
+        f"📅 {date} | {time}\n"
+        f"📍 {place}\n"
+        f"🆚 {opponent}\n"
+        f"ID: <b>{game_id}</b>",
+        parse_mode="HTML"
+    )
+    await state.clear()
 
 # Обработка нажатий на кнопки
 async def button_callback(callback_query: CallbackQuery):
@@ -521,11 +668,9 @@ async def button_callback(callback_query: CallbackQuery):
     elif data == "create_training":
         if await is_coach(user_id):
             await callback_query.message.edit_text(
-                "📅 Введи дату и время тренировки в формате:\n"
-                "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
-                "Пример: `2026-02-01 19:00`"
+                "📝 Чтобы создать тренировку, отправь команду:\n"
+                "/new_training"
             )
-            await create_draft_event(user_id, "training")
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -535,11 +680,9 @@ async def button_callback(callback_query: CallbackQuery):
     elif data == "create_game":
         if await is_coach(user_id):
             await callback_query.message.edit_text(
-                "📅 Введи дату и время игры в формате:\n"
-                "`ГГГГ-ММ-ДД ЧЧ:ММ`\n\n"
-                "Пример: `2026-02-05 18:00`"
+                "📝 Чтобы создать игру, отправь команду:\n"
+                "/new_game"
             )
-            await create_draft_event(user_id, "game")
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -589,151 +732,6 @@ async def button_callback(callback_query: CallbackQuery):
             reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
         )
 
-    elif data == "no_description":
-        draft = await get_draft_event(user_id)
-        if draft and draft["status"] == "awaiting_description":
-            event_type = draft["event_type"]
-            date = draft["date"]
-            time = draft["time"]
-            place = draft["place"]
-            description = ""
-
-            if event_type == "training":
-                await create_training(date, time, place, description)
-                await callback_query.message.edit_text(
-                    f"✅ Тренировка создана:\n{date} | {time} | {place}"
-                )
-            elif event_type == "game":
-                opponent = draft["opponent"]
-                await create_game(date, time, place, opponent, description)
-                await callback_query.message.edit_text(
-                    f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}"
-                )
-
-            # Удаляем черновик
-            await delete_draft_event(user_id)
-
-            # Отправляем главное меню
-            profile = await get_player(user_id)
-            await callback_query.message.answer(
-                f"👋 Привет, {profile['first_name']}!\n"
-                f"Ты в системе хоккейной команды.\n\n"
-                "Выбери действие:",
-                reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
-            )
-
-# Обработка сообщений для создания событий
-async def handle_create_event(message: Message):
-    user_id = message.from_user.id
-    text = message.text.strip()
-
-    draft = await get_draft_event(user_id)
-    if not draft:
-        return
-
-    status = draft["status"]
-
-    if status == "awaiting_datetime":
-        parts = text.split(" ", 1)
-        if len(parts) != 2:
-            await message.answer("❌ Неверный формат. Нужно: Дата Время")
-            return
-
-        date, time = parts[0], parts[1]
-
-        # Проверим формат даты
-        try:
-            datetime.strptime(date, "%Y-%m-%d")
-        except ValueError:
-            await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
-            return
-
-        # Проверим формат времени
-        try:
-            datetime.strptime(time, "%H:%M")
-        except ValueError:
-            await message.answer("❌ Неверный формат времени. Используй: ЧЧ:ММ")
-            return
-
-        # Обновляем черновик
-        await update_draft_event(user_id, "date", date)
-        await update_draft_event(user_id, "time", time)
-
-        # Запрашиваем место
-        event_type = draft["event_type"]
-        if event_type == "training":
-            await message.answer(
-                "📍 Введи место проведения тренировки:\n\n"
-                "Пример: Ледовая арена"
-            )
-        elif event_type == "game":
-            await message.answer(
-                "📍 Введи место проведения игры:\n\n"
-                "Пример: Ледовая арена"
-            )
-
-    elif status == "awaiting_place":
-        place = text
-
-        # Обновляем черновик
-        await update_draft_event(user_id, "place", place)
-
-        # Запрашиваем следующий шаг
-        event_type = draft["event_type"]
-        if event_type == "training":
-            await message.answer(
-                "📝 Описание (необязательно):\n\n"
-                "Отправь описание или нажми кнопку «Без описания»",
-                reply_markup=no_description_keyboard()
-            )
-        elif event_type == "game":
-            await message.answer(
-                "🆚 Введи название соперника:\n\n"
-                "Пример: Авангард"
-            )
-
-    elif status == "awaiting_opponent":
-        opponent = text
-
-        # Обновляем черновик
-        await update_draft_event(user_id, "opponent", opponent)
-
-        # Запрашиваем описание
-        await message.answer(
-            "📝 Описание (необязательно):\n\n"
-            "Отправь описание или нажми кнопку «Без описания»",
-            reply_markup=no_description_keyboard()
-        )
-
-    elif status == "awaiting_description":
-        description = text
-
-        # Получаем данные из черновика
-        event_type = draft["event_type"]
-        date = draft["date"]
-        time = draft["time"]
-        place = draft["place"]
-
-        if event_type == "training":
-            await create_training(date, time, place, description)
-            await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {place}")
-        elif event_type == "game":
-            opponent = draft["opponent"]
-            await create_game(date, time, place, opponent, description)
-            await message.answer(f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}")
-
-        # Удаляем черновик
-        await delete_draft_event(user_id)
-
-        # Отправляем главное меню
-        profile = await get_player(user_id)
-        await message.answer(
-            f"👋 Привет, {profile['first_name']}!\n"
-            f"Ты в системе хоккейной команды.\n\n"
-            "Выбери действие:",
-            reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
-        )
-
 # Функция для отправки уведомлений (в фоне)
 async def send_reminders(bot):
     while True:
@@ -776,18 +774,32 @@ async def send_reminders(bot):
 async def main():
     await init_db()
 
+    global bot
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
+
+    # Регистрируем FSM-хендлеры
+    dp.message.register(cmd_new_training, Command("new_training"))
+    dp.message.register(process_training_datetime, NewTraining.datetime)
+    dp.message.register(process_training_location, NewTraining.location)
+    dp.message.register(process_training_max_players, NewTraining.max_players)
+    dp.message.register(process_training_description, NewTraining.description)
+
+    dp.message.register(cmd_new_game, Command("new_game"))
+    dp.message.register(process_game_datetime, NewGame.datetime)
+    dp.message.register(process_game_location, NewGame.location)
+    dp.message.register(process_game_opponent, NewGame.opponent)
+    dp.message.register(process_game_description, NewGame.description)
 
     # Запускаем задачу для напоминаний
     asyncio.create_task(send_reminders(bot))
 
+    # Регистрируем остальные хендлеры
     dp.message.register(start_command, Command("start"))
     dp.message.register(restart_command, Command("restart"))
     dp.message.register(handle_profile, F.text & ~F.command)
-    dp.message.register(handle_create_event, F.text & ~F.command)
     dp.callback_query.register(handle_role_selection, lambda c: c.data in ["role_player", "role_coach"])
-    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main", "no_description"] or c.data.startswith("signup_"))
+    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
 
     print("✅ Бот запущен. Ждём сообщений...")
     await dp.start_polling(bot)
