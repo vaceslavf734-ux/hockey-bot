@@ -79,49 +79,29 @@ def back_keyboard():
     keyboard = [[types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-# Глобальный словарь для хранения последних сообщений бота
-# {user_id: message_id}
-last_bot_messages = {}
-
-# Функция для удаления старых сообщений бота
-async def delete_old_messages(bot, chat_id, user_id):
-    if user_id in last_bot_messages:
-        try:
-            await bot.delete_message(chat_id, last_bot_messages[user_id])
-        except Exception as e:
-            print(f"Не удалось удалить сообщение {last_bot_messages[user_id]}: {e}")
-        del last_bot_messages[user_id]
-
 # Команда /start
 async def start_command(message: Message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
-
-    # Удаляем предыдущие сообщения бота (если есть)
-    await delete_old_messages(message.bot, chat_id, user_id)
 
     if await player_exists(user_id):
         profile = await get_player(user_id)
-        msg = await message.answer(
+        await message.answer(
             f"👋 Привет, {profile['first_name']}!\n"
             f"Ты в системе хоккейной команды.\n\n"
             "Выбери действие:",
             reply_markup=main_menu_keyboard()
         )
-        last_bot_messages[user_id] = msg.message_id
     else:
-        msg = await message.answer(
+        await message.answer(
             "👋 Привет! Давай создадим твой профиль.\n\n"
             "Напиши в одном сообщении:\n"
             "**Имя Фамилия Номер**\n\n"
             "Пример: `Вячеслав Федоров 19`"
         )
-        last_bot_messages[user_id] = msg.message_id
 
 # Обработка сообщения с профилем
 async def handle_profile(message: Message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
 
     if await player_exists(user_id):
         return
@@ -149,12 +129,9 @@ async def handle_profile(message: Message):
     except:
         pass
 
-    # Удаляем все предыдущие сообщения бота
-    await delete_old_messages(message.bot, chat_id, user_id)
-
     # Отправляем главное меню
     profile = await get_player(user_id)
-    msg = await message.answer(
+    await message.answer(
         f"🎉 Профиль создан!\n"
         f"Имя: {first_name}\n"
         f"Фамилия: {last_name}\n"
@@ -162,25 +139,17 @@ async def handle_profile(message: Message):
         "Выбери действие:",
         reply_markup=main_menu_keyboard()
     )
-    last_bot_messages[user_id] = msg.message_id
 
 # Обработка нажатий на кнопки
 async def button_callback(callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
 
-    # Удаляем старое сообщение (если оно было сохранено)
-    if user_id in last_bot_messages:
-        try:
-            await callback_query.bot.delete_message(callback_query.message.chat.id, last_bot_messages[user_id])
-        except:
-            pass
-        del last_bot_messages[user_id]
-
+    # Редактируем текущее сообщение (заменяем содержимое)
     if data == "profile":
         profile = await get_player(user_id)
         if profile:
-            msg = await callback_query.message.edit_text(
+            await callback_query.message.edit_text(
                 f"👤 Твой профиль:\n"
                 f"Имя: {profile['first_name']}\n"
                 f"Фамилия: {profile['last_name']}\n"
@@ -188,25 +157,22 @@ async def button_callback(callback_query: CallbackQuery):
                 reply_markup=back_keyboard()
             )
         else:
-            msg = await callback_query.message.edit_text(
+            await callback_query.message.edit_text(
                 "❌ Профиль не найден.",
                 reply_markup=back_keyboard()
             )
-        last_bot_messages[user_id] = msg.message_id
 
     elif data == "trainings":
-        msg = await callback_query.message.edit_text(
+        await callback_query.message.edit_text(
             "🏒 Здесь будет расписание тренировок.",
             reply_markup=back_keyboard()
         )
-        last_bot_messages[user_id] = msg.message_id
 
     elif data == "games":
-        msg = await callback_query.message.edit_text(
+        await callback_query.message.edit_text(
             "🎮 Здесь будет расписание игр.",
             reply_markup=back_keyboard()
         )
-        last_bot_messages[user_id] = msg.message_id
 
     elif data == "team":
         players = await get_all_players()
@@ -216,22 +182,20 @@ async def button_callback(callback_query: CallbackQuery):
             text = "📋 <b>Состав команды:</b>\n\n"
             for idx, (first, last, num) in enumerate(players, 1):
                 text += f"{idx}. {first} {last} (#{num})\n"
-        msg = await callback_query.message.edit_text(
+        await callback_query.message.edit_text(
             text,
             parse_mode="HTML",
             reply_markup=back_keyboard()
         )
-        last_bot_messages[user_id] = msg.message_id
 
     elif data == "back_to_main":
         profile = await get_player(user_id)
-        msg = await callback_query.message.edit_text(
+        await callback_query.message.edit_text(
             f"👋 Привет, {profile['first_name']}!\n"
             f"Ты в системе хоккейной команды.\n\n"
             "Выбери действие:",
             reply_markup=main_menu_keyboard()
         )
-        last_bot_messages[user_id] = msg.message_id
 
 # Основная функция
 async def main():
