@@ -16,7 +16,7 @@ DB_PATH = 'hockey.db'
 COACH_PASSWORD = "1234"
 
 # Глобальный словарь для отслеживания состояний
-user_states = {}  # {user_id: {"stage": "waiting_for_date", "data": {...}}}
+user_states = {}  # {user_id: {"stage": "...", "data": {...}}}
 
 # Инициализация БД
 async def init_db():
@@ -591,8 +591,15 @@ async def handle_create_event(message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
+    # Если пользователь не в состоянии — игнорируем
+    if user_id not in user_states:
+        return
+
+    state = user_states[user_id]
+    stage = state.get("stage")
+
     # Если ждём дату и время тренировки
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_training_datetime":
+    if stage == "waiting_for_training_datetime":
         parts = text.split(" ", 1)
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Нужно: Дата Время")
@@ -615,9 +622,9 @@ async def handle_create_event(message: Message):
             return
 
         # Сохраняем данные
-        user_states[user_id]["date"] = date
-        user_states[user_id]["time"] = time
-        user_states[user_id]["stage"] = "waiting_for_training_place"
+        state["date"] = date
+        state["time"] = time
+        state["stage"] = "waiting_for_training_place"
 
         await message.answer(
             "📍 Введи место проведения тренировки:\n\n"
@@ -626,12 +633,12 @@ async def handle_create_event(message: Message):
         return
 
     # Если ждём место тренировки
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_training_place":
+    if stage == "waiting_for_training_place":
         place = text
 
         # Сохраняем место
-        user_states[user_id]["place"] = place
-        user_states[user_id]["stage"] = "waiting_for_description"
+        state["place"] = place
+        state["stage"] = "waiting_for_description"
 
         await message.answer(
             "📝 Описание (необязательно):\n\n"
@@ -641,7 +648,7 @@ async def handle_create_event(message: Message):
         return
 
     # Если ждём дату и время игры
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_game_datetime":
+    if stage == "waiting_for_game_datetime":
         parts = text.split(" ", 1)
         if len(parts) != 2:
             await message.answer("❌ Неверный формат. Нужно: Дата Время")
@@ -664,9 +671,9 @@ async def handle_create_event(message: Message):
             return
 
         # Сохраняем данные
-        user_states[user_id]["date"] = date
-        user_states[user_id]["time"] = time
-        user_states[user_id]["stage"] = "waiting_for_game_place"
+        state["date"] = date
+        state["time"] = time
+        state["stage"] = "waiting_for_game_place"
 
         await message.answer(
             "📍 Введи место проведения игры:\n\n"
@@ -675,12 +682,12 @@ async def handle_create_event(message: Message):
         return
 
     # Если ждём место игры
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_game_place":
+    if stage == "waiting_for_game_place":
         place = text
 
         # Сохраняем место
-        user_states[user_id]["place"] = place
-        user_states[user_id]["stage"] = "waiting_for_opponent"
+        state["place"] = place
+        state["stage"] = "waiting_for_opponent"
 
         await message.answer(
             "🆚 Введи название соперника:\n\n"
@@ -689,12 +696,12 @@ async def handle_create_event(message: Message):
         return
 
     # Если ждём соперника
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_opponent":
+    if stage == "waiting_for_opponent":
         opponent = text
 
         # Сохраняем соперника
-        user_states[user_id]["opponent"] = opponent
-        user_states[user_id]["stage"] = "waiting_for_description"
+        state["opponent"] = opponent
+        state["stage"] = "waiting_for_description"
 
         await message.answer(
             "📝 Описание (необязательно):\n\n"
@@ -704,11 +711,10 @@ async def handle_create_event(message: Message):
         return
 
     # Если ждём описание (для тренировки или игры)
-    if user_id in user_states and user_states[user_id].get("stage") == "waiting_for_description":
+    if stage == "waiting_for_description":
         description = text
 
         # Создаём событие
-        state = user_states[user_id]
         event_type = state["type"]
 
         if event_type == "training":
