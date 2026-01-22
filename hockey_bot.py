@@ -16,7 +16,7 @@ DB_PATH = 'hockey.db'
 COACH_PASSWORD = "1234"
 
 # Глобальный словарь для отслеживания состояний
-user_states = {}  # {user_id: "waiting_for_coach_name"}
+user_states = {}  # {user_id: "waiting_for_coach_password", "waiting_for_coach_name", "waiting_for_training", "waiting_for_game"}
 
 # Инициализация БД
 async def init_db():
@@ -37,8 +37,20 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 time TEXT NOT NULL,
+                place TEXT NOT NULL,
                 description TEXT,
                 max_participants INTEGER DEFAULT 20
+            )
+        ''')
+        # Таблица игр
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS games (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                time TEXT NOT NULL,
+                place TEXT NOT NULL,
+                opponent TEXT NOT NULL,
+                description TEXT
             )
         ''')
         # Таблица записей на тренировки
@@ -103,20 +115,40 @@ async def get_all_players():
         return rows
 
 # Создать тренировку
-async def create_training(date, time, description, max_participants=20):
+async def create_training(date, time, place, description="", max_participants=20):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
-            INSERT INTO trainings (date, time, description, max_participants)
-            VALUES (?, ?, ?, ?)
-        ''', (date, time, description, max_participants))
+            INSERT INTO trainings (date, time, place, description, max_participants)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (date, time, place, description, max_participants))
+        await db.commit()
+
+# Создать игру
+async def create_game(date, time, place, opponent, description=""):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            INSERT INTO games (date, time, place, opponent, description)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (date, time, place, opponent, description))
         await db.commit()
 
 # Получить все тренировки
 async def get_trainings():
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute('''
-            SELECT id, date, time, description, max_participants
+            SELECT id, date, time, place, description, max_participants
             FROM trainings
+            ORDER BY date, time
+        ''')
+        rows = await cursor.fetchall()
+        return rows
+
+# Получить все игры
+async def get_games():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute('''
+            SELECT id, date, time, place, opponent, description
+            FROM games
             ORDER BY date, time
         ''')
         rows = await cursor.fetchall()
@@ -179,11 +211,11 @@ def main_menu_keyboard(is_coach=False):
     keyboard = [
         [types.InlineKeyboardButton(text="👤 Мой профиль", callback_data="profile")],
         [types.InlineKeyboardButton(text="🏒 Тренировки", callback_data="trainings_list")],
-        [types.InlineKeyboardButton(text="🎮 Игры", callback_data="games")],
+        [types.InlineKeyboardButton(text="🎮 Игры", callback_data="games_list")],
         [types.InlineKeyboardButton(text="📋 Состав", callback_data="team")],
     ]
     if is_coach:
-        keyboard.append([types.InlineKeyboardButton(text="教练 🎯", callback_data="coach_menu")])
+        keyboard.append([types.InlineKeyboardButton(text="🎯 Тренер", callback_data="coach_menu")])
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 # Клавиатура "Назад"
@@ -360,10 +392,12 @@ async def button_callback(callback_query: CallbackQuery):
         else:
             text = "🏒 <b>Ближайшие тренировки:</b>\n\n"
             for t in trainings:
-                training_id, date, time, desc, max_p = t
+                training_id, date, time, place, desc, max_p = t
                 count = await get_signup_count(training_id)
                 text += f"📅 <b>{date}</b> | ⏰ {time}\n"
-                text += f"📝 {desc}\n"
+                text += f"📍 {place}\n"
+                if desc:
+                    text += f"📝 {desc}\n"
                 text += f"👥 Участники: {count}/{max_p}\n"
                 text += f"/signup_{training_id} — записаться\n\n"
             await callback_query.message.edit_text(
@@ -387,11 +421,28 @@ async def button_callback(callback_query: CallbackQuery):
                 reply_markup=back_keyboard()
             )
 
-    elif data == "games":
-        await callback_query.message.edit_text(
-            "🎮 Здесь будет расписание игр.",
-            reply_markup=back_keyboard()
-        )
+    elif data == "games_list":
+        games = await get_games()
+        if not games:
+            await callback_query.message.edit_text(
+                "🎮 Игры пока не созданы.",
+                reply_markup=back_keyboard()
+            )
+        else:
+            text = "🎮 <b>Ближайшие игры:</b>\n\n"
+            for g in games:
+                game_id, date, time, place, opponent, desc = g
+                text += f"📅 <b>{date}</b> | ⏰ {time}\n"
+                text += f"📍 {place}\n"
+                text += f"🆚 {opponent}\n"
+                if desc:
+                    text += f"📝 {desc}\n"
+                text += "\n"
+            await callback_query.message.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=back_keyboard()
+            )
 
     elif data == "team":
         players = await get_all_players()
@@ -411,6 +462,7 @@ async def button_callback(callback_query: CallbackQuery):
         if await is_coach(user_id):
             keyboard = [
                 [types.InlineKeyboardButton(text="➕ Создать тренировку", callback_data="create_training")],
+                [types.InlineKeyboardButton(text="➕ Создать игру", callback_data="create_game")],
                 [types.InlineKeyboardButton(text="👥 Участники тренировки", callback_data="list_participants")],
                 [types.InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_main")]
             ]
@@ -428,10 +480,28 @@ async def button_callback(callback_query: CallbackQuery):
         if await is_coach(user_id):
             await callback_query.message.edit_text(
                 "📝 Отправь информацию о тренировке в формате:\n"
-                "`Дата Время Описание`\n\n"
-                "Пример: `2026-02-01 19:00 Тренировка вратарей`",
+                "`Дата Время Место`\n\n"
+                "Описание (необязательно) — отправь отдельным сообщением.\n\n"
+                "Пример: `2026-02-01 19:00 Ледовая арена`",
                 reply_markup=back_keyboard()
             )
+            user_states[user_id] = "waiting_for_training_info"
+        else:
+            await callback_query.message.edit_text(
+                "❌ У тебя нет прав тренера.",
+                reply_markup=back_keyboard()
+            )
+
+    elif data == "create_game":
+        if await is_coach(user_id):
+            await callback_query.message.edit_text(
+                "📝 Отправь информацию об игре в формате:\n"
+                "`Дата Время Место Соперник`\n\n"
+                "Описание (необязательно) — отправь отдельным сообщением.\n\n"
+                "Пример: `2026-02-05 18:00 Ледовая арена Авангард`",
+                reply_markup=back_keyboard()
+            )
+            user_states[user_id] = "waiting_for_game_info"
         else:
             await callback_query.message.edit_text(
                 "❌ У тебя нет прав тренера.",
@@ -449,10 +519,12 @@ async def button_callback(callback_query: CallbackQuery):
             else:
                 text = "👥 Участники тренировок:\n\n"
                 for t in trainings:
-                    training_id, date, time, desc, _ = t
+                    training_id, date, time, place, desc, _ = t
                     participants = await get_training_participants(training_id)
                     text += f"📅 {date} | ⏰ {time}\n"
-                    text += f"📝 {desc}\n"
+                    text += f"📍 {place}\n"
+                    if desc:
+                        text += f"📝 {desc}\n"
                     if participants:
                         text += "Участники:\n"
                         for p in participants:
@@ -479,6 +551,61 @@ async def button_callback(callback_query: CallbackQuery):
             reply_markup=main_menu_keyboard(profile['is_coach'] if profile else False)
         )
 
+# Обработка сообщений для создания тренировки/игры
+async def handle_create_event(message: Message):
+    user_id = message.from_user.id
+    text = message.text.strip()
+
+    # Если ждём информацию о тренировке
+    if user_id in user_states and user_states[user_id] == "waiting_for_training_info":
+        parts = text.split(" ", 3)
+        if len(parts) < 3:
+            await message.answer("❌ Неверный формат. Нужно: Дата Время Место")
+            return
+
+        date, time, place = parts[0], parts[1], parts[2]
+        description = parts[3] if len(parts) > 3 else ""
+
+        # Проверим формат даты
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
+            return
+
+        await create_training(date, time, place, description)
+
+        # Очищаем состояние
+        del user_states[user_id]
+
+        await message.answer(f"✅ Тренировка создана:\n{date} | {time} | {place}")
+        return
+
+    # Если ждём информацию об игре
+    if user_id in user_states and user_states[user_id] == "waiting_for_game_info":
+        parts = text.split(" ", 4)
+        if len(parts) < 4:
+            await message.answer("❌ Неверный формат. Нужно: Дата Время Место Соперник")
+            return
+
+        date, time, place, opponent = parts[0], parts[1], parts[2], parts[3]
+        description = parts[4] if len(parts) > 4 else ""
+
+        # Проверим формат даты
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            await message.answer("❌ Неверный формат даты. Используй: ГГГГ-ММ-ДД")
+            return
+
+        await create_game(date, time, place, opponent, description)
+
+        # Очищаем состояние
+        del user_states[user_id]
+
+        await message.answer(f"✅ Игра создана:\n{date} | {time} | {place} | {opponent}")
+        return
+
 # Функция для отправки уведомлений (в фоне)
 async def send_reminders(bot):
     while True:
@@ -490,14 +617,14 @@ async def send_reminders(bot):
 
         async with aiosqlite.connect(DB_PATH) as db:
             cursor = await db.execute('''
-                SELECT t.id, t.date, t.time, t.description
+                SELECT t.id, t.date, t.time, t.place, t.description
                 FROM trainings t
                 WHERE t.date || ' ' || t.time = ?
             ''', (reminder_str,))
             trainings = await cursor.fetchall()
 
         for t in trainings:
-            training_id, date, time, desc = t
+            training_id, date, time, place, desc = t
 
             # Получаем участников
             participants = await get_training_participants(training_id)
@@ -510,7 +637,10 @@ async def send_reminders(bot):
                 if row:
                     user_id = row[0]
                     try:
-                        await bot.send_message(user_id, f"⏰ Напоминание!\nТренировка:\n{date} | {time} | {desc}")
+                        msg = f"⏰ Напоминание!\nТренировка:\n{date} | {time} | {place}"
+                        if desc:
+                            msg += f"\n{desc}"
+                        await bot.send_message(user_id, msg)
                     except:
                         pass  # Не смогли отправить — пропускаем
 
@@ -527,8 +657,9 @@ async def main():
     dp.message.register(start_command, Command("start"))
     dp.message.register(restart_command, Command("restart"))
     dp.message.register(handle_profile, F.text & ~F.command)
+    dp.message.register(handle_create_event, F.text & ~F.command)
     dp.callback_query.register(handle_role_selection, lambda c: c.data in ["role_player", "role_coach"])
-    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games", "team", "coach_menu", "create_training", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
+    dp.callback_query.register(button_callback, lambda c: c.data in ["profile", "trainings_list", "games_list", "team", "coach_menu", "create_training", "create_game", "list_participants", "back_to_main"] or c.data.startswith("signup_"))
 
     print("✅ Бот запущен. Ждём сообщений...")
     await dp.start_polling(bot)
