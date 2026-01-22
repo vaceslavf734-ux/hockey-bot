@@ -7,7 +7,7 @@ from aiogram.fsm.state import StatesGroup, State
 import aiosqlite
 
 # === Конфигурация ===
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # Замени на токен своего бота
+BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"  # Замени на токен своего бота
 DATABASE = "hockey.db"
 
 # === FSM Состояния ===
