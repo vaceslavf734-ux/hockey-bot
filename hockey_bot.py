@@ -24,11 +24,21 @@ class UserStates(StatesGroup):
     waiting_for_event_datetime = State()
     waiting_for_event_location = State()
 
+    # Удаление события
+    waiting_for_event_id_to_delete = State()
+
 # === Инициализация бота ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === Вспомогательные функции ===
+
+async def safe_delete(chat_id: int, message_id: int):
+    """Безопасное удаление сообщения (игнорирует ошибки)"""
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass  # Например, сообщение уже удалено или старше 48ч
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
@@ -43,10 +53,10 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type TEXT NOT NULL,          -- 'training' или 'game'
-                datetime TEXT NOT NULL,      -- ISO формат: YYYY-MM-DD HH:MM
+                type TEXT NOT NULL,
+                datetime TEXT NOT NULL,
                 location TEXT NOT NULL,
-                created_by INTEGER           -- user_id тренера
+                created_by INTEGER
             )
         """)
         await db.commit()
@@ -75,6 +85,7 @@ def get_coach_menu():
             [KeyboardButton(text="🏒 Создать тренировку")],
             [KeyboardButton(text="🎮 Создать игру")],
             [KeyboardButton(text="📋 Мои события")],
+            [KeyboardButton(text="🗑 Удалить событие")],
             [KeyboardButton(text="👥 Состав")]
         ],
         resize_keyboard=True,
@@ -101,8 +112,16 @@ async def get_coach_events(user_id: int):
             WHERE created_by = ?
             ORDER BY datetime
         """, (user_id,))
-        rows = await cursor.fetchall()
-        return rows
+        return await cursor.fetchall()
+
+async def delete_event_by_id(event_id: int, user_id: int) -> bool:
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            DELETE FROM events
+            WHERE id = ? AND created_by = ?
+        """, (event_id, user_id))
+        await db.commit()
+        return cursor.rowcount > 0
 
 # === Обработчики ===
 
@@ -131,7 +150,7 @@ async def handle_start_button(message: types.Message, state: FSMContext):
 @dp.message(UserStates.waiting_for_role)
 async def handle_role_selection(message: types.Message, state: FSMContext):
     if message.text == "Я игрок":
-        await message.answer("Функционал игрока пока не готов. Выбери 'Я тренер' для тестирования.")
+        await message.answer("Функционал игрока пока не готов.")
         return
     elif message.text == "Я тренер":
         await message.answer("Введите пароль тренера:")
@@ -154,56 +173,88 @@ async def handle_coach_name(message: types.Message, state: FSMContext):
         return
     success = await save_coach_name(message.from_user.id, message.text)
     if not success:
-        await message.answer("Ошибка: введите хотя бы два слова (имя и фамилию).")
+        await message.answer("Ошибка: введите хотя бы два слова.")
         return
     await message.answer("✅ Профиль тренера создан!", reply_markup=get_coach_menu())
     await state.set_state(UserStates.coach_menu)
 
-# === Создание тренировки / игры ===
+# === Меню тренера ===
 
 @dp.message(UserStates.coach_menu)
 async def handle_coach_menu(message: types.Message, state: FSMContext):
-    if message.text == "🏒 Создать тренировку":
+    text = message.text
+    if text == "🏒 Создать тренировку":
         await state.update_data(event_type="training")
-        await message.answer("📅 Введите дату и время тренировки в формате:\n`ДД ММ ГГГГ ЧЧ:ММ`\nНапример: `12 12 2025 18:00`", parse_mode="Markdown")
+        sent = await message.answer("📅 Введите дату и время тренировки:\n`ДД ММ ГГГГ ЧЧ:ММ`\nНапример: `12 12 2025 18:00`", parse_mode="Markdown")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
         await state.set_state(UserStates.waiting_for_event_datetime)
-    elif message.text == "🎮 Создать игру":
+    elif text == "🎮 Создать игру":
         await state.update_data(event_type="game")
-        await message.answer("📅 Введите дату и время игры в формате:\n`ДД ММ ГГГГ ЧЧ:ММ`\nНапример: `15 12 2025 19:30`", parse_mode="Markdown")
+        sent = await message.answer("📅 Введите дату и время игры:\n`ДД ММ ГГГГ ЧЧ:ММ`\nНапример: `15 12 2025 19:30`", parse_mode="Markdown")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
         await state.set_state(UserStates.waiting_for_event_datetime)
-    elif message.text == "📋 Мои события":
+    elif text == "📋 Мои события":
         events = await get_coach_events(message.from_user.id)
         if not events:
-            await message.answer("У вас пока нет созданных тренировок или игр.")
+            await message.answer("У вас нет созданных событий.")
         else:
             lines = []
-            for i, (eid, etype, dt, loc) in enumerate(events, 1):
+            for eid, etype, dt, loc in events:
                 label = "🏒 Тренировка" if etype == "training" else "🎮 Игра"
-                lines.append(f"{i}. {label}\n   📅 {dt}\n   📍 {loc}\n")
+                lines.append(f"ID {eid}\n{label}\n📅 {dt}\n📍 {loc}\n")
             await message.answer("Ваши события:\n\n" + "\n".join(lines))
-    elif message.text == "👥 Состав":
-        await message.answer("Просмотр состава (в разработке)...")
+    elif text == "🗑 Удалить событие":
+        events = await get_coach_events(message.from_user.id)
+        if not events:
+            await message.answer("Нет событий для удаления.")
+            return
+        lines = [f"ID {eid}: {'Тренировка' if t=='training' else 'Игра'} ({dt})" for eid, t, dt, _ in events]
+        sent = await message.answer(
+            "Введите ID события для удаления:\n\n" + "\n".join(lines) +
+            "\n\nОтмена: /cancel"
+        )
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        await state.set_state(UserStates.waiting_for_event_id_to_delete)
+    elif text == "👥 Состав":
+        await message.answer("Состав (в разработке)...")
     else:
         await message.answer("Используйте кнопки меню.")
 
+# === Создание события ===
+
 @dp.message(UserStates.waiting_for_event_datetime)
 async def handle_event_datetime(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
     parsed = parse_datetime_input(message.text)
     if not parsed:
-        await message.answer("❌ Неверный формат.\nПопробуйте снова: `ДД ММ ГГГГ ЧЧ:ММ` (например: `12 12 2025 18:00`)", parse_mode="Markdown")
+        sent = await message.answer("❌ Неверный формат.\nПопробуйте: `ДД ММ ГГГГ ЧЧ:ММ`", parse_mode="Markdown")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
         return
+
     await state.update_data(event_datetime=parsed)
-    await message.answer("📍 Укажите место проведения:")
+    sent = await message.answer("📍 Укажите место проведения:")
+    await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(UserStates.waiting_for_event_location)
 
 @dp.message(UserStates.waiting_for_event_location)
 async def handle_event_location(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
     location = message.text.strip()
     if len(location) < 3:
-        await message.answer("❌ Название места слишком короткое. Попробуйте снова.")
+        sent = await message.answer("❌ Слишком короткое название. Попробуйте снова.")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
         return
 
-    data = await state.get_data()
     event_type = data["event_type"]
     event_datetime = data["event_datetime"]
     user_id = message.from_user.id
@@ -215,15 +266,42 @@ async def handle_event_location(message: types.Message, state: FSMContext):
         """, (event_type, event_datetime, location, user_id))
         await db.commit()
 
-    event_label = "тренировка" if event_type == "training" else "игра"
-    await message.answer(f"✅ {event_label.capitalize()} создана!\n📅 {event_datetime}\n📍 {location}", reply_markup=get_coach_menu())
+    label = "тренировка" if event_type == "training" else "игра"
+    sent = await message.answer(f"✅ {label.capitalize()} создана!\n📅 {event_datetime}\n📍 {location}", reply_markup=get_coach_menu())
+    await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(UserStates.coach_menu)
+
+# === Удаление события ===
+
+@dp.message(UserStates.waiting_for_event_id_to_delete)
+async def handle_delete_event_id(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    await safe_delete(message.chat.id, message.message_id)
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    if not message.text.isdigit():
+        sent = await message.answer("❌ Введите число (ID события). Отмена: /cancel")
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        return
+
+    event_id = int(message.text)
+    success = await delete_event_by_id(event_id, message.from_user.id)
+    if success:
+        sent = await message.answer("✅ Событие удалено.", reply_markup=get_coach_menu())
+    else:
+        sent = await message.answer("❌ Событие не найдено или у вас нет прав на его удаление.", reply_markup=get_coach_menu())
+    await state.update_data(prev_bot_msg_id=sent.message_id)
+    await state.set_state(UserStates.coach_menu)
+
+# === Отмена ===
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state and "waiting_for_event" in current_state:
-        await message.answer("❌ Отменено. Вернитесь в меню.", reply_markup=get_coach_menu())
+    if current_state and ("waiting_for_event" in current_state or "waiting_for_event_id" in current_state):
+        await message.answer("❌ Отменено.", reply_markup=get_coach_menu())
         await state.set_state(UserStates.coach_menu)
     else:
         await message.answer("Нечего отменять.")
@@ -233,7 +311,7 @@ async def cmd_restart(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     await reset_user_profile(user_id)
     await state.clear()
-    await message.answer("Твой профиль сброшен. Нажми /start, чтобы начать заново.")
+    await message.answer("Профиль сброшен. Нажмите /start.")
 
 # === Запуск ===
 async def main():
