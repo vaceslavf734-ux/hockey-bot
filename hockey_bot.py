@@ -26,6 +26,7 @@ class UserStates(StatesGroup):
 
     # Удаление события
     waiting_for_event_id_to_delete = State()
+    confirming_deletion = State()  # Подтверждение удаления
 
 # === Инициализация бота ===
 bot = Bot(token=BOT_TOKEN)
@@ -38,7 +39,7 @@ async def safe_delete(chat_id: int, message_id: int):
     try:
         await bot.delete_message(chat_id, message_id)
     except Exception:
-        pass  # Например, сообщение уже удалено или старше 48ч
+        pass
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
@@ -122,6 +123,16 @@ async def delete_event_by_id(event_id: int, user_id: int) -> bool:
         """, (event_id, user_id))
         await db.commit()
         return cursor.rowcount > 0
+
+async def get_event_by_id(event_id: int, user_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT type, datetime, location
+            FROM events
+            WHERE id = ? AND created_by = ?
+        """, (event_id, user_id))
+        row = await cursor.fetchone()
+        return row
 
 # === Обработчики ===
 
@@ -220,13 +231,12 @@ async def handle_coach_menu(message: types.Message, state: FSMContext):
     else:
         await message.answer("Используйте кнопки меню.")
 
-# === Создание события ===
+# === Создание события (минималистично) ===
 
 @dp.message(UserStates.waiting_for_event_datetime)
 async def handle_event_datetime(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
     if prev_id:
         await safe_delete(message.chat.id, prev_id)
 
@@ -245,7 +255,6 @@ async def handle_event_datetime(message: types.Message, state: FSMContext):
 async def handle_event_location(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
     if prev_id:
         await safe_delete(message.chat.id, prev_id)
 
@@ -271,13 +280,12 @@ async def handle_event_location(message: types.Message, state: FSMContext):
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(UserStates.coach_menu)
 
-# === Удаление события ===
+# === Удаление события с подтверждением ===
 
 @dp.message(UserStates.waiting_for_event_id_to_delete)
 async def handle_delete_event_id(message: types.Message, state: FSMContext):
     data = await state.get_data()
     prev_id = data.get("prev_bot_msg_id")
-    await safe_delete(message.chat.id, message.message_id)
     if prev_id:
         await safe_delete(message.chat.id, prev_id)
 
@@ -287,11 +295,41 @@ async def handle_delete_event_id(message: types.Message, state: FSMContext):
         return
 
     event_id = int(message.text)
-    success = await delete_event_by_id(event_id, message.from_user.id)
-    if success:
-        sent = await message.answer("✅ Событие удалено.", reply_markup=get_coach_menu())
-    else:
+    event_info = await get_event_by_id(event_id, message.from_user.id)
+    if not event_info:
         sent = await message.answer("❌ Событие не найдено или у вас нет прав на его удаление.", reply_markup=get_coach_menu())
+        await state.update_data(prev_bot_msg_id=sent.message_id)
+        await state.set_state(UserStates.coach_menu)
+        return
+
+    etype, dt, loc = event_info
+    label = "Тренировка" if etype == "training" else "Игра"
+    confirm_text = f"⚠️ Вы действительно хотите удалить:\n{label} ({dt})\n📍 {loc}\n\nОтветьте: да / нет"
+
+    sent = await message.answer(confirm_text)
+    await state.update_data(event_id_to_delete=event_id, prev_bot_msg_id=sent.message_id)
+    await state.set_state(UserStates.confirming_deletion)
+
+@dp.message(UserStates.confirming_deletion)
+async def handle_confirm_deletion(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    prev_id = data.get("prev_bot_msg_id")
+    if prev_id:
+        await safe_delete(message.chat.id, prev_id)
+
+    text = message.text.strip().lower()
+    if text in ["да", "yes", "y"]:
+        event_id = data["event_id_to_delete"]
+        success = await delete_event_by_id(event_id, message.from_user.id)
+        if success:
+            sent = await message.answer("✅ Событие удалено.", reply_markup=get_coach_menu())
+        else:
+            sent = await message.answer("❌ Ошибка при удалении.", reply_markup=get_coach_menu())
+    elif text in ["нет", "no", "n"]:
+        sent = await message.answer("❌ Удаление отменено.", reply_markup=get_coach_menu())
+    else:
+        sent = await message.answer("Пожалуйста, ответьте: да или нет.", reply_markup=get_coach_menu())
+
     await state.update_data(prev_bot_msg_id=sent.message_id)
     await state.set_state(UserStates.coach_menu)
 
@@ -300,8 +338,8 @@ async def handle_delete_event_id(message: types.Message, state: FSMContext):
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
-    if current_state and ("waiting_for_event" in current_state or "waiting_for_event_id" in current_state):
-        await message.answer("❌ Отменено.", reply_markup=get_coach_menu())
+    if current_state and ("waiting_for_event" in current_state or "waiting_for_event_id" in current_state or "confirming_deletion" in current_state):
+        await message.answer("❌ Действие отменено.", reply_markup=get_coach_menu())
         await state.set_state(UserStates.coach_menu)
     else:
         await message.answer("Нечего отменять.")
