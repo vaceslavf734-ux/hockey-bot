@@ -6,19 +6,20 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 import aiosqlite
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import logging
 
 # === Конфигурация ===
 BOT_TOKEN = "8194198392:AAFjEcdDbJw8ev8NKRYM5lOqyKwg-dN4eCs"
 DATABASE = "hockey.db"
 COACH_PASSWORD = "1234"
 
+# Включим логирование
+logging.basicConfig(level=logging.INFO)
+
 # === FSM Состояния ===
 class UserStates(StatesGroup):
-    # Общие
     waiting_for_role = State()
-
-    # Тренер
     waiting_for_coach_password = State()
     waiting_for_coach_name = State()
     coach_menu = State()
@@ -27,9 +28,7 @@ class UserStates(StatesGroup):
     waiting_for_opponent = State()
     waiting_for_event_id_to_delete = State()
     confirming_deletion = State()
-
-    # Игрок
-    waiting_for_player_profile = State()  # имя фамилия номер
+    waiting_for_player_profile = State()
     waiting_for_event_to_join = State()
     player_menu = State()
 
@@ -38,12 +37,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # === Вспомогательные функции ===
-
-async def safe_delete(chat_id: int, message_id: int):
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except Exception:
-        pass
 
 async def init_db():
     async with aiosqlite.connect(DATABASE) as db:
@@ -174,7 +167,7 @@ async def get_coach_events_with_registrations(user_id: int):
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("""
             SELECT e.id, e.type, e.datetime, e.location, e.opponent,
-                   GROUP_CONCAT(u.name || ' ' || u.surname || ' (' || u.number || ')', '\n') AS players
+                   GROUP_CONCAT(u.name || ' ' || u.surname || ' (' || IFNULL(u.number, '?') || ')', '\n') AS players
             FROM events e
             LEFT JOIN registrations r ON e.id = r.event_id
             LEFT JOIN users u ON r.user_id = u.user_id
@@ -203,25 +196,72 @@ async def get_player_registrations(user_id: int):
         """, (user_id,))
         return await cursor.fetchall()
 
-# === Обработчики ===
+# === НОВАЯ ФУНКЦИЯ: получаем участников с user_id ===
+async def get_players_for_event_with_user_id(event_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT u.user_id, u.name, u.surname, u.number
+            FROM registrations r
+            JOIN users u ON r.user_id = u.user_id
+            WHERE r.event_id = ?
+        """, (event_id,))
+        return await cursor.fetchall()
+
+# === ФОН: Напоминания ===
+
+async def send_reminders():
+    """Проверяет каждую минуту, не наступило ли время напоминаний"""
+    while True:
+        try:
+            # Целевое время: сейчас + 1 час
+            target_dt = datetime.now() + timedelta(hours=1)
+            target_str = target_dt.strftime("%Y-%m-%d %H:%M")
+
+            async with aiosqlite.connect(DATABASE) as db:
+                cursor = await db.execute("""
+                    SELECT id, type, datetime, location, opponent
+                    FROM events
+                    WHERE datetime = ?
+                """, (target_str,))
+                events = await cursor.fetchall()
+
+            for eid, etype, dt, loc, opp in events:
+                players = await get_players_for_event_with_user_id(eid)
+                if not players:
+                    continue
+
+                label = "Тренировка" if etype == "training" else f"Игра vs {opp or '—'}"
+                message_text = (
+                    f"🔔 Напоминание!\n"
+                    f"Через 1 час начинается:\n"
+                    f"{label}\n"
+                    f"📅 {dt}\n"
+                    f"📍 {loc}"
+                )
+
+                for user_id, name, surname, number in players:
+                    try:
+                        await bot.send_message(user_id, message_text)
+                    except Exception as e:
+                        logging.warning(f"Не удалось отправить напоминание пользователю {user_id}: {e}")
+
+            await asyncio.sleep(60)  # проверка раз в минуту
+
+        except Exception as e:
+            logging.error(f"Ошибка в фоновой задаче напоминаний: {e}")
+            await asyncio.sleep(60)
+
+# === ОБРАБОТЧИКИ ===
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    role = await get_user_role(message.from_user.id)
-    if role == "coach":
-        await message.answer("✅ Вы уже зарегистрированы как тренер.", reply_markup=get_coach_menu())
-        await state.set_state(UserStates.coach_menu)
-    elif role == "player":
-        await message.answer("✅ Вы уже зарегистрированы как игрок.", reply_markup=get_player_menu())
-        await state.set_state(UserStates.player_menu)
-    else:
-        markup = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Старт")]],
-            resize_keyboard=True,
-            one_time_keyboard=True
-        )
-        await message.answer("Привет! Нажми 'Старт', чтобы начать.", reply_markup=markup)
+    markup = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Старт")]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    await message.answer("Привет! Нажми кнопку ниже, чтобы начать.", reply_markup=markup)
 
 @dp.message(lambda msg: msg.text == "Старт")
 async def handle_start_button(message: types.Message, state: FSMContext):
@@ -232,7 +272,7 @@ async def handle_start_button(message: types.Message, state: FSMContext):
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await message.answer("Выбери роль:", reply_markup=markup)
+    await message.answer("Выбери свою роль:", reply_markup=markup)
     await state.set_state(UserStates.waiting_for_role)
 
 @dp.message(UserStates.waiting_for_role)
@@ -244,7 +284,7 @@ async def handle_role_selection(message: types.Message, state: FSMContext):
         await message.answer("Введите ваш профиль: Имя Фамилия Номер\nПример: Иван Петров 19")
         await state.set_state(UserStates.waiting_for_player_profile)
     else:
-        await message.answer("Выберите одну из кнопок.")
+        await message.answer("Пожалуйста, выберите одну из кнопок.")
 
 # === Тренер ===
 
@@ -254,7 +294,7 @@ async def handle_coach_password(message: types.Message, state: FSMContext):
         await message.answer("✅ Пароль верный!\nВведите имя и фамилию (например: Иван Петров):")
         await state.set_state(UserStates.waiting_for_coach_name)
     else:
-        await message.answer("❌ Неверный пароль.")
+        await message.answer("❌ Неверный пароль. Попробуйте снова.")
 
 @dp.message(UserStates.waiting_for_coach_name)
 async def handle_coach_name(message: types.Message, state: FSMContext):
@@ -428,7 +468,7 @@ async def join_event(message: types.Message, state: FSMContext):
     await message.answer("✅ Вы записаны!", reply_markup=get_player_menu())
     await state.set_state(UserStates.player_menu)
 
-# === Команды ===
+# === КОМАНДЫ ===
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: types.Message, state: FSMContext):
@@ -441,18 +481,24 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
         elif role == "player":
             await message.answer("❌ Отменено.", reply_markup=get_player_menu())
             await state.set_state(UserStates.player_menu)
+        else:
+            await cmd_start(message, state)
     else:
         await message.answer("Нечего отменять.")
 
 @dp.message(Command("restart"))
 async def cmd_restart(message: types.Message, state: FSMContext):
-    await reset_user_profile(message.from_user.id)
+    user_id = message.from_user.id
+    await reset_user_profile(user_id)
     await state.clear()
-    await message.answer("Профиль сброшен. Нажмите /start.")
+    await message.answer("🔄 Ваш профиль полностью удалён.\nТеперь вы можете зарегистрироваться заново.")
+    await cmd_start(message, state)
 
-# === Запуск ===
+# === ЗАПУСК ===
 async def main():
     await init_db()
+    # Запуск фоновой задачи напоминаний
+    asyncio.create_task(send_reminders())
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
