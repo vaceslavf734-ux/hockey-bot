@@ -111,91 +111,150 @@ def parse_datetime_input(text: str):
 
 # === Работа с БД ===
 
-async def save_coach(user_id: int, full_name: str):
-    parts = full_name.strip().split()
-    if len(parts) < 2:
-        return False
-    name, surname = parts[0], " ".join(parts[1:])
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO users (user_id, role, name, surname)
-            VALUES (?, 'coach', ?, ?)
-        """, (user_id, name, surname))
-        await db.commit()
-    return True
+# ... (весь предыдущий код остаётся, но добавляем ниже новые функции и обработчики)
 
-async def save_player(user_id: int, input_text: str):
-    pattern = r"^([А-Яа-яЁё]+)\s+([А-Яа-яЁё]+)\s+(\d{1,3})$"
-    match = re.fullmatch(pattern, input_text.strip())
-    if not match:
-        return False
-    name, surname, number = match.groups()
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("""
-            INSERT OR REPLACE INTO users (user_id, role, name, surname, number)
-            VALUES (?, 'player', ?, ?, ?)
-        """, (user_id, name, surname, number))
-        await db.commit()
-    return True
+# === ДОБАВЬ ЭТИ ФУНКЦИИ В РАЗДЕЛ "Работа с БД" ===
 
-async def get_user_role(user_id: int):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("SELECT role FROM users WHERE user_id = ?", (user_id,))
-        row = await cursor.fetchone()
-        return row[0] if row else None
-
-async def create_event(user_id: int, etype: str, dt: str, loc: str, opponent: str = None):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("""
-            INSERT INTO events (type, datetime, location, opponent, created_by)
-            VALUES (?, ?, ?, ?, ?)
-        """, (etype, dt, loc, opponent, user_id))
-        await db.commit()
-
-async def get_all_upcoming_events():
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+async def get_all_players():
+    """Возвращает всех игроков (не тренеров)"""
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("""
-            SELECT id, type, datetime, location, opponent
-            FROM events
-            WHERE datetime > ?
-            ORDER BY datetime
-        """, (now,))
+            SELECT name, surname, number
+            FROM users
+            WHERE role = 'player'
+            ORDER BY surname, name
+        """)
         return await cursor.fetchall()
 
-async def get_coach_events_with_registrations(user_id: int):
+async def get_event_registrations(event_id: int):
+    """Возвращает список участников события по event_id"""
     async with aiosqlite.connect(DATABASE) as db:
         cursor = await db.execute("""
-            SELECT e.id, e.type, e.datetime, e.location, e.opponent,
-                   GROUP_CONCAT(u.name || ' ' || u.surname || ' (' || IFNULL(u.number, '?') || ')', '\n') AS players
-            FROM events e
-            LEFT JOIN registrations r ON e.id = r.event_id
-            LEFT JOIN users u ON r.user_id = u.user_id
-            WHERE e.created_by = ?
-            GROUP BY e.id
-            ORDER BY e.datetime
-        """, (user_id,))
-        return await cursor.fetchall()
-
-async def register_player(user_id: int, event_id: int):
-    async with aiosqlite.connect(DATABASE) as db:
-        await db.execute("""
-            INSERT OR IGNORE INTO registrations (user_id, event_id)
-            VALUES (?, ?)
-        """, (user_id, event_id))
-        await db.commit()
-
-async def get_player_registrations(user_id: int):
-    async with aiosqlite.connect(DATABASE) as db:
-        cursor = await db.execute("""
-            SELECT e.id, e.type, e.datetime, e.location, e.opponent
+            SELECT u.name, u.surname, u.number
             FROM registrations r
-            JOIN events e ON r.event_id = e.id
-            WHERE r.user_id = ?
-            ORDER BY e.datetime
-        """, (user_id,))
+            JOIN users u ON r.user_id = u.user_id
+            WHERE r.event_id = ?
+            ORDER BY u.surname, u.name
+        """, (event_id,))
         return await cursor.fetchall()
 
+async def get_event_by_id_simple(event_id: int):
+    async with aiosqlite.connect(DATABASE) as db:
+        cursor = await db.execute("""
+            SELECT type, datetime, location, opponent
+            FROM events
+            WHERE id = ?
+        """, (event_id,))
+        return await cursor.fetchone()
+
+# === ОБНОВИМ МЕНЮ ИГРОКА ===
+
+def get_player_menu():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📅 Записаться на событие")],
+            [KeyboardButton(text="📋 Мои записи")],
+            [KeyboardButton(text="👥 Состав")],
+            [KeyboardButton(text="👀 Кто записан?")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+# === ДОБАВИМ НОВЫЕ СОСТОЯНИЯ В UserStates ===
+
+# Уже есть:
+# waiting_for_player_profile
+# waiting_for_event_to_join
+# player_menu
+
+# Добавим:
+class UserStates(StatesGroup):
+    # ... все предыдущие состояния ...
+    waiting_for_event_to_view_roster = State()  # <-- новое
+
+# === ОБРАБОТЧИКИ ДЛЯ ИГРОКА ===
+
+@dp.message(UserStates.player_menu)
+async def handle_player_menu(message: types.Message, state: FSMContext):
+    text = message.text
+    if text == "📅 Записаться на событие":
+        events = await get_all_upcoming_events()
+        if not events:
+            await message.answer("Нет предстоящих событий.")
+            return
+        lines = []
+        for eid, etype, dt, loc, opp in events:
+            # Получаем количество участников
+            regs = await get_event_registrations(eid)
+            count = len(regs)
+            label = "Тренировка" if etype == "training" else f"Игра vs {opp or '—'}"
+            lines.append(f"{eid}. {label} — {dt}\n   📍 {loc} | 👥 {count} игроков")
+        await message.answer("Выберите ID события:\n\n" + "\n".join(lines))
+        await state.set_state(UserStates.waiting_for_event_to_join)
+    elif text == "📋 Мои записи":
+        regs = await get_player_registrations(message.from_user.id)
+        if not regs:
+            await message.answer("Вы никуда не записаны.")
+        else:
+            lines = []
+            for eid, etype, dt, loc, opp in regs:
+                label = "Тренировка" if etype == "training" else f"Игра vs {opp or '—'}"
+                lines.append(f"{label} — {dt} — {loc}")
+            await message.answer("Ваши записи:\n\n" + "\n".join(lines))
+    elif text == "👥 Состав":
+        players = await get_all_players()
+        if not players:
+            await message.answer("В составе пока нет игроков.")
+        else:
+            lines = []
+            for i, (name, surname, number) in enumerate(players, 1):
+                lines.append(f"{i}. {name} {surname} (#{number})")
+            await message.answer("👥 Состав команды:\n\n" + "\n".join(lines))
+    elif text == "👀 Кто записан?":
+        events = await get_all_upcoming_events()
+        if not events:
+            await message.answer("Нет предстоящих событий.")
+            return
+        lines = []
+        for eid, etype, dt, loc, opp in events:
+            regs = await get_event_registrations(eid)
+            count = len(regs)
+            label = "Тренировка" if etype == "training" else f"Игра vs {opp or '—'}"
+            lines.append(f"{eid}. {label} — {dt} | 👥 {count}")
+        await message.answer("Выберите ID события, чтобы увидеть состав:\n\n" + "\n".join(lines))
+        await state.set_state(UserStates.waiting_for_event_to_view_roster)
+    else:
+        await message.answer("Используйте кнопки.")
+
+# === ПРОСМОТР СОСТАВА СОБЫТИЯ ===
+
+@dp.message(UserStates.waiting_for_event_to_view_roster)
+async def view_event_roster(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("Введите ID числом.")
+        return
+    event_id = int(message.text)
+    event = await get_event_by_id_simple(event_id)
+    if not event:
+        await message.answer("Событие не найдено.", reply_markup=get_player_menu())
+        await state.set_state(UserStates.player_menu)
+        return
+
+    etype, dt, loc, opp = event
+    label = "Тренировка" if etype == "training" else f"Игра vs {opp or '—'}"
+    players = await get_event_registrations(event_id)
+
+    if not players:
+        roster_text = "Никто не записался."
+    else:
+        roster_lines = []
+        for i, (name, surname, number) in enumerate(players, 1):
+            roster_lines.append(f"{i}. {name} {surname} (#{number})")
+        roster_text = "\n".join(roster_lines)
+
+    await message.answer(f"👥 Участники:\n{label}\n📅 {dt}\n📍 {loc}\n\n{roster_text}", reply_markup=get_player_menu())
+    await state.set_state(UserStates.player_menu)
 # === НОВАЯ ФУНКЦИЯ: получаем участников с user_id ===
 async def get_players_for_event_with_user_id(event_id: int):
     async with aiosqlite.connect(DATABASE) as db:
